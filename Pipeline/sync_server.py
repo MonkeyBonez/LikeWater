@@ -17,5 +17,10 @@ for city in shipped["cities"]:
         link.unlink()
     os.symlink(os.path.relpath(resources / city["file"], server), link)
 manifest["cities"] = shipped["cities"]
+# Every metro entry carries its build time (the app's buildKey); backfill from the index.
+for m in manifest.get("metros", []):
+    index = server / m["index"]
+    if "built" not in m and index.exists():
+        m["built"] = json.load(open(index))["built"]
 json.dump(manifest, open(manifest_path, "w"), indent=2)
 print(f"{len(manifest['cities'])} cities, {len(manifest.get('metros', []))} metros in {manifest_path}")

@@ -1,0 +1,98 @@
+# Places the pipeline builds as tiled metros (PLAN.md §2 F). The owner edits this list;
+# build_places.py builds every entry not yet in Server/manifest.json (or --only <id>).
+#
+#   id        directory under Server/ and the manifest id (stable; never reuse)
+#   name      what the app shows
+#   extract   Geofabrik path, without "-latest.osm.pbf" (download.geofabrik.de/<extract>-latest.osm.pbf)
+#   places    Nominatim names whose union is the metro boundary (build_metro.py --place)
+#   survey    optional city sidewalk survey (survey.py SURVEYS: nyc, seattle)
+#   demo      LAT,LON the app shows when the user is elsewhere
+#   min_component  optional; keep disconnected pieces at least this big (default 2000)
+#
+# USA only for now (PLAN.md standing decisions).
+
+metros:
+  # --- built before this list existed (kept so rebuilds use the same arguments) ---
+  - id: seattle
+    name: Seattle
+    extract: north-america/us/washington
+    places: ["Seattle, Washington, USA"]
+    survey: seattle
+    demo: 47.6097,-122.3422
+  - id: nyc
+    name: New York
+    extract: north-america/us/new-york
+    places: ["New York City, New York, USA"]
+    survey: nyc
+    demo: 40.7536,-73.9832
+  - id: la
+    name: Los Angeles
+    extract: north-america/us/california/socal
+    places: ["Los Angeles, California, USA", "Beverly Hills, California, USA",
+             "West Hollywood, California, USA", "Santa Monica, California, USA",
+             "Culver City, California, USA"]
+    demo: 34.0505,-118.2551
+
+  # --- first new place: the end-to-end check of this pipeline ---
+  - id: portland
+    name: Portland
+    extract: north-america/us/oregon
+    places: ["Portland, Oregon, USA"]
+    demo: 45.5231,-122.6765
+
+  # --- the next US metros by population, not yet built ---
+  - id: chicago
+    name: Chicago
+    extract: north-america/us/illinois
+    places: ["Chicago, Illinois, USA"]
+    demo: 41.8827,-87.6233
+  - id: houston
+    name: Houston
+    extract: north-america/us/texas
+    places: ["Houston, Texas, USA"]
+    demo: 29.7589,-95.3677
+  - id: dallas
+    name: Dallas
+    extract: north-america/us/texas
+    places: ["Dallas, Texas, USA"]
+    demo: 32.7801,-96.8003
+  - id: austin
+    name: Austin
+    extract: north-america/us/texas
+    places: ["Austin, Texas, USA"]
+    demo: 30.2672,-97.7431
+  - id: sanantonio
+    name: San Antonio
+    extract: north-america/us/texas
+    places: ["San Antonio, Texas, USA"]
+    demo: 29.4252,-98.4946
+  - id: phoenix
+    name: Phoenix
+    extract: north-america/us/arizona
+    places: ["Phoenix, Arizona, USA"]
+    demo: 33.4484,-112.0740
+  - id: philadelphia
+    name: Philadelphia
+    extract: north-america/us/pennsylvania
+    places: ["Philadelphia, Pennsylvania, USA"]
+    demo: 39.9526,-75.1652
+  - id: sandiego
+    name: San Diego
+    extract: north-america/us/california/socal
+    places: ["San Diego, California, USA"]
+    demo: 32.7157,-117.1611
+  - id: sanjose
+    name: San Jose
+    extract: north-america/us/california/norcal
+    places: ["San Jose, California, USA"]
+    demo: 37.3337,-121.8907
+  - id: boston
+    name: Boston
+    extract: north-america/us/massachusetts
+    places: ["Boston, Massachusetts, USA", "Cambridge, Massachusetts, USA"]
+    demo: 42.3554,-71.0605
+  - id: washington
+    name: Washington
+    extract: north-america/us/district-of-columbia
+    places: ["Washington, District of Columbia, USA"]
+    demo: 38.8977,-77.0365

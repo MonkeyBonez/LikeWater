@@ -235,7 +235,7 @@ which is what nav apps achieve, because every term is known or measurable:
   Relaxed 1.1 / Normal 1.4 / Brisk 1.7;
 - *slope* — the bundle has 10 m terrain, so each edge gets a grade from `TerrainGrid` at
   its two ends (2 samples, ~50 ns each) and Tobler's hiking function normalised to the base
-  pace: +10 % grade → 0.70×, −5 % → 1.0×, −15 % → 0.70× (a Nob Hill block is 2× slower, a
+  pace: +10 % grade → 0.70×, −5 % → 1.19× (fastest), −15 % → 0.84× (a Nob Hill block is 2× slower, a
   whole SF walk 10–20 %);
 - *crossings* — `EdgeFlag.crossing` edges get a wait (default 12 s; the pipeline can later
   split signalised from unsignalised via OSM `crossing=traffic_signals`, BACKLOG);

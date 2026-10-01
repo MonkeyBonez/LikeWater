@@ -255,7 +255,7 @@ def main():
         manifest = json.load(open(manifest_path))
     entry = dict(id=args.id, name=args.name, index=f"{args.id}/metro.json", timezone=tz,
                  minLat=metro["minLat"], minLon=metro["minLon"], maxLat=metro["maxLat"], maxLon=metro["maxLon"],
-                 bytes=total, tiles=len(tiles), demo=demo)
+                 bytes=total, tiles=len(tiles), demo=demo, built=metro["built"])
     manifest["metros"] = [m for m in manifest.get("metros", []) if m["id"] != args.id] + [entry]
     manifest.setdefault("cities", [])
     json.dump(manifest, open(manifest_path, "w"), indent=2)

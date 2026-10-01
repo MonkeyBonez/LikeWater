@@ -1,0 +1,60 @@
+# Builds new places from Pipeline/metros.yaml and publishes them to Cloudflare Pages
+# (PLAN.md §2 F). Inert until the owner sets, in the repo settings:
+#   variable  LW_PAGES_PROJECT        e.g. likewater-tiles
+#   variable  LW_BUNDLE_BASE_URL      e.g. https://likewater-tiles.pages.dev/
+#   secret    CLOUDFLARE_API_TOKEN    (Pages: Edit)
+#   secret    CLOUDFLARE_ACCOUNT_ID
+# A Pages deploy replaces the whole site, so the job first pulls the live site into
+# Server/ (publish.py --pull), builds what's missing, and deploys everything.
+name: build-places
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "metros.yaml id to (re)build; empty = every unbuilt place"
+        required: false
+  schedule:
+    - cron: "0 9 * * 1"   # Mondays 09:00 UTC
+
+jobs:
+  build:
+    if: vars.LW_PAGES_PROJECT != ''
+    runs-on: ubuntu-latest        # 4 vCPU / 16 GB on public repos, 2 vCPU / 7 GB on private
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - uses: actions/cache@v4
+        with:
+          path: Pipeline/cache/pbf
+          key: pbf-${{ hashFiles('Pipeline/metros.yaml') }}
+          restore-keys: pbf-
+      - name: Python deps
+        working-directory: Pipeline
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q osmium duckdb shapely numpy pyproj timezonefinder requests pyyaml osmnx
+      - name: Pull the live site
+        working-directory: Pipeline
+        run: .venv/bin/python publish.py --pull "${{ vars.LW_BUNDLE_BASE_URL }}"
+      - name: Build
+        working-directory: Pipeline
+        run: |
+          if [ -n "${{ inputs.only }}" ]; then ONLY="--only ${{ inputs.only }}"; fi
+          .venv/bin/python build_places.py --max-minutes 240 $ONLY
+      - name: Publish
+        working-directory: Pipeline
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          LW_PAGES_PROJECT: ${{ vars.LW_PAGES_PROJECT }}
+        run: .venv/bin/python publish.py --target pages
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: |
+            Pipeline/cache/build_log.jsonl
+            Pipeline/cache/build_logs/*.log

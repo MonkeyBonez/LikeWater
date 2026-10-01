@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Nightly new-place builds at 02:00 (PLAN.md §2 F): builds every metros.yaml entry not
+     yet in Server/manifest.json, then publishes to Cloudflare Pages. NOT installed by
+     default — install only after publishing works by hand (README "Hosting"):
+       cp Pipeline/launchd/com.likewater.build.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.likewater.build.plist
+     Remove: launchctl bootout gui/$(id -u)/com.likewater.build -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.likewater.build</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/.venv/bin/python</string>
+    <string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/build_places.py</string>
+    <string>--max-minutes</string><string>240</string>
+    <string>--publish</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/cache/build_logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/cache/build_logs/launchd.log</string>
+</dict>
+</plist>

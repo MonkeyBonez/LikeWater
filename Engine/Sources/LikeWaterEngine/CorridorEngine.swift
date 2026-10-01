@@ -27,6 +27,13 @@ public struct Corridor {
     public var edges: [Int32]
     /// Parallel to `edges`: extra metres this edge costs versus the shortest path.
     public var excess: [Double]
+    /// Parallel to `edges`: the fewest metres from the origin at which any admissible path
+    /// (one within the bound) starts walking this edge.
+    public var fromOrigin: [Double]
+    /// Parallel to `edges`: the most metres from the origin at which an admissible path can
+    /// still start this edge and reach the destination within the bound. Together with
+    /// `fromOrigin` this is the window of arrival times a walker can hit the edge in.
+    public var latestFromOrigin: [Double]
     /// Subset of `edges` tagged as marked crossings.
     public var crossingEdges: [Int32]
     /// Free choices at the next real decision point. A GPS fix usually snaps to a mid-block
@@ -65,6 +72,8 @@ public final class CorridorScratch {
     fileprivate var g: [Double]
     fileprivate var closed: [Bool]
     fileprivate var edgeExcess: [Double]
+    fileprivate var edgeFrom: [Double]
+    fileprivate var edgeLatest: [Double]
     fileprivate var touchedNodes: [Int32] = []
     public let nodeCount: Int
     public let edgeCount: Int
@@ -74,6 +83,8 @@ public final class CorridorScratch {
         g = [Double](repeating: .infinity, count: graph.nodeCount)
         closed = [Bool](repeating: false, count: graph.nodeCount)
         edgeExcess = [Double](repeating: .infinity, count: graph.edgeCount)
+        edgeFrom = [Double](repeating: .infinity, count: graph.edgeCount)
+        edgeLatest = [Double](repeating: -.infinity, count: graph.edgeCount)
     }
 
     fileprivate func fits(_ graph: PedestrianGraph) -> Bool {
@@ -212,24 +223,35 @@ public enum CorridorEngine {
                 guard total <= bound else { continue }
                 if work.edgeExcess[e].isInfinite { touchedEdges.append(Int32(e)) }
                 work.edgeExcess[e] = min(work.edgeExcess[e], total - D)
+                work.edgeFrom[e] = min(work.edgeFrom[e], gu)
+                work.edgeLatest[e] = max(work.edgeLatest[e], bound - graph.edgeLen[e] - h)
             }
         }
 
         var edges: [Int32] = []
         var excess: [Double] = []
+        var fromOrigin: [Double] = []
+        var latest: [Double] = []
         var crossings: [Int32] = []
         edges.reserveCapacity(touchedEdges.count)
         excess.reserveCapacity(touchedEdges.count)
+        fromOrigin.reserveCapacity(touchedEdges.count)
+        latest.reserveCapacity(touchedEdges.count)
         for e in touchedEdges {
             edges.append(e)
             excess.append(work.edgeExcess[Int(e)])
+            fromOrigin.append(work.edgeFrom[Int(e)])
+            latest.append(work.edgeLatest[Int(e)])
             work.edgeExcess[Int(e)] = .infinity
+            work.edgeFrom[Int(e)] = .infinity
+            work.edgeLatest[Int(e)] = -.infinity
             if graph.isCrossing(Int(e)) { crossings.append(e) }
         }
 
         let decision = nextDecision(graph: graph, dTo: dTo, g: work.g, origin: origin, bound: bound)
 
         return Corridor(distance: D, slack: slack, edges: edges, excess: excess,
+                        fromOrigin: fromOrigin, latestFromOrigin: latest,
                         crossingEdges: crossings, choicesHere: decision.choices,
                         metersToDecision: decision.meters,
                         nodesExplored: explored,

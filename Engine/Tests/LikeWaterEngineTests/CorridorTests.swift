@@ -2,32 +2,6 @@ import XCTest
 @testable import LikeWaterEngine
 
 
-/// Builds a rows x cols lattice with exact 100 m edges so corridor sets are exactly predictable.
-private func gridGraph(rows: Int, cols: Int, spacing: Double = 100) -> PedestrianGraph {
-    var lat: [Double] = [], lon: [Double] = []
-    for i in 0..<rows {
-        for j in 0..<cols {
-            lat.append(37.7800 + Double(i) * 0.0009)
-            lon.append(-122.4100 + Double(j) * 0.00114)
-        }
-    }
-    func idx(_ i: Int, _ j: Int) -> Int32 { Int32(i * cols + j) }
-    var a: [Int32] = [], b: [Int32] = [], len: [Double] = [], crossing: [Bool] = []
-    for i in 0..<rows {
-        for j in 0..<cols {
-            if j + 1 < cols {
-                a.append(idx(i, j)); b.append(idx(i, j + 1)); len.append(spacing); crossing.append(j % 2 == 0)
-            }
-            if i + 1 < rows {
-                a.append(idx(i, j)); b.append(idx(i + 1, j)); len.append(spacing); crossing.append(false)
-            }
-        }
-    }
-    let box = BBox(minLat: lat.min()!, minLon: lon.min()!, maxLat: lat.max()!, maxLon: lon.max()!)
-    return PedestrianGraph(nodeLat: lat, nodeLon: lon, edgeA: a, edgeB: b,
-                           edgeLen: len, edgeFlags: crossing.map { $0 ? EdgeFlag.crossing : 0 }, bbox: box)
-}
-
 final class CorridorTests: XCTestCase {
 
     func testGridCorridorIsExactlyTheRectangle() throws {
@@ -171,5 +145,33 @@ final class CorridorTests: XCTestCase {
         XCTAssertLessThan(labelMs, 1500)
         XCTAssertLessThan(corridorMs, 400)
         XCTAssertLessThan(c.nodesExplored, g.nodeCount)
+    }
+
+    func testArrivalWindowsBracketEveryCorridorEdge() throws {
+        let cols = 5
+        let g = gridGraph(rows: 5, cols: cols)
+        let origin = Int32(0), dest = Int32(3 * cols + 2)
+        let slack = 0.4
+        let labels = try CorridorEngine.labels(graph: g, destination: dest, origin: origin, slack: slack)
+        let c = try CorridorEngine.corridor(graph: g, labels: labels, origin: origin, slack: slack)
+        XCTAssertEqual(c.fromOrigin.count, c.edges.count)
+        XCTAssertEqual(c.latestFromOrigin.count, c.edges.count)
+        let D = c.distance
+        for i in c.edges.indices {
+            XCTAssertLessThanOrEqual(c.fromOrigin[i], c.latestFromOrigin[i] + 1e-6)
+            XCTAssertGreaterThanOrEqual(c.latestFromOrigin[i] - c.fromOrigin[i], D * slack - c.excess[i] - 1e-5)
+            if c.excess[i] < 1e-6 {
+                XCTAssertEqual(c.latestFromOrigin[i] - c.fromOrigin[i], D * slack, accuracy: 1e-4)
+            }
+        }
+        // The first edge out of the origin starts at 0 m.
+        XCTAssertEqual(c.fromOrigin.min() ?? -1, 0, accuracy: 1e-9)
+
+        // Reusing the scratch must not leak windows from the previous call.
+        let scratch = CorridorScratch(graph: g)
+        _ = try CorridorEngine.corridor(graph: g, labels: labels, origin: origin, slack: slack, scratch: scratch)
+        let again = try CorridorEngine.corridor(graph: g, labels: labels, origin: origin, slack: slack, scratch: scratch)
+        XCTAssertEqual(again.fromOrigin, c.fromOrigin)
+        XCTAssertEqual(again.latestFromOrigin, c.latestFromOrigin)
     }
 }
