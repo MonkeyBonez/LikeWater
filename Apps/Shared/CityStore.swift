@@ -19,13 +19,21 @@ final class LoadedCity {
     let metroID: String?
     /// Files fetched from the server to build this city (0 when all were on the phone).
     let downloaded: Int
+    /// The whole place's bounds (the metro's, or the single bundle's), for coverage.
+    let extent: BBox
+    /// The metro build the tiles came from; nil for a single-file city.
+    let built: String?
 
     init(id: String, name: String, bundle: CityBundle, loadMs: Double, timeZone: TimeZone?,
-         validBox: BBox, tiles: Set<String> = [], metroID: String? = nil, downloaded: Int = 0) {
+         validBox: BBox, tiles: Set<String> = [], metroID: String? = nil, downloaded: Int = 0,
+         extent: BBox? = nil, built: String? = nil) {
         self.id = id; self.name = name; self.bundle = bundle; self.loadMs = loadMs
         self.timeZone = timeZone; self.validBox = validBox; self.tiles = tiles; self.metroID = metroID
-        self.downloaded = downloaded
+        self.downloaded = downloaded; self.extent = extent ?? validBox; self.built = built
     }
+
+    /// Covered, or partial when the box reaches past the place's own bounds.
+    func coverage(of box: BBox) -> CoverageState { extent.contains(box) ? .covered : .partial }
 
     func covers(_ c: CLLocationCoordinate2D) -> Bool {
         validBox.contains(lat: c.latitude, lon: c.longitude)
@@ -84,20 +92,33 @@ actor CityStore {
         try await city(covering: [coordinate])
     }
 
-    /// A city covering every point (a walk's start and destination). For a metro this
-    /// stitches every tile the walk's box needs.
+    /// The city for a set of points (a walk's two ends, or a screen's centre and corners),
+    /// chosen by the box they span — the place most of it falls in — not by the first
+    /// point, so a screen half outside a city still gets the half that has data. For a
+    /// metro this stitches every tile the box needs.
     func city(covering points: [CLLocationCoordinate2D]) async throws -> LoadedCity {
-        guard let first = points.first else { throw CityCatalogError.noCoverage }
+        guard !points.isEmpty else { throw CityCatalogError.noCoverage }
         if let metro, points.allSatisfy({ metro.covers($0) }) { return metro }
         if let hit = singles.values.first(where: { c in points.allSatisfy { c.covers($0) } }) { return hit }
+        let box = BBox.around(points.map { ($0.latitude, $0.longitude) }, paddingMeters: 0)
 
-        if let m = await CityCatalog.shared.metro(covering: first) {
-            return try await loadMetro(m, around: points)
+        let m = await CityCatalog.shared.metro(covering: box)
+        let single = await CityCatalog.shared.localCity(covering: box)
+        // A shipped single city wins where it covers more of the box than the metro does.
+        if let m, single.map({ $0.bbox.overlapArea(box) <= m.index.bbox.overlapArea(box) }) ?? true {
+            do {
+                return try await loadMetro(m, around: points)
+            } catch let error as CityCatalogError {
+                // A newer build that can't be fetched (offline): keep serving the old one.
+                guard case .downloadFailed = error, let older = m.fallback else { throw error }
+                return try await loadMetro(older, around: points)
+            } catch let error as URLError {
+                guard let older = m.fallback else { throw error }
+                return try await loadMetro(older, around: points)
+            }
         }
-        if let local = await CityCatalog.shared.localCity(covering: first) {
-            return try await load(local)
-        }
-        guard let remote = try await CityCatalog.shared.remoteCity(covering: first) else {
+        if let single { return try await load(single) }
+        guard let remote = try await CityCatalog.shared.remoteCity(covering: box) else {
             throw CityCatalogError.noCoverage
         }
         let mb = Double(remote.bytes) / 1e6
@@ -113,6 +134,7 @@ actor CityStore {
         let descriptor = try await CityCatalog.shared.download(remote) { fraction in
             Task { @MainActor in CityLoadState.shared.progress = fraction }
         }
+        touch(descriptor.url)
         return try await load(descriptor)
     }
 
@@ -137,7 +159,8 @@ actor CityStore {
             let bundle = try CityBundle(contentsOf: descriptor.url)
             let city = LoadedCity(id: descriptor.id, name: descriptor.name, bundle: bundle,
                                   loadMs: (CFAbsoluteTimeGetCurrent() - t0) * 1000,
-                                  timeZone: descriptor.timeZone, validBox: descriptor.bbox)
+                                  timeZone: descriptor.timeZone, validBox: descriptor.bbox,
+                                  extent: descriptor.bbox)
             await MainActor.run { CityLoadState.shared.message = nil }
             return city
         }
@@ -160,7 +183,8 @@ actor CityStore {
         let wanted = Self.tiles(for: points, in: m.index)
         guard !wanted.isEmpty else { throw CityCatalogError.noCoverage }
         guard wanted.count <= Self.maxTiles else { throw CityCatalogError.walkTooLong }
-        let key = m.id + ":" + wanted.map { "\($0.i)_\($0.j)" }.joined(separator: ",")
+        // The build is part of the key: tiles of two builds never share a stitch.
+        let key = m.id + "@" + m.buildKey + ":" + wanted.map { "\($0.i)_\($0.j)" }.joined(separator: ",")
         if let metro, metro.id == key { return metro }
         if let task = inFlight[key] { return try await task.value }
 
@@ -173,6 +197,9 @@ actor CityStore {
         defer { inFlight[key] = nil }
         let city = try await task.value
         metro = city
+        await CityCatalog.shared.markReady(metro: m.id, directory: m.localDirectory)
+        evictIfNeeded()
+        prefetchRing(m, around: wanted)
         return city
     }
 
@@ -201,6 +228,7 @@ actor CityStore {
                     group.addTask {
                         try await self.download(remote.appendingPathComponent(file),
                                                 to: m.localDirectory.appendingPathComponent(file))
+                        await self.touch(m.localDirectory.appendingPathComponent(file))
                         let fraction = await done.add(sizes[file] ?? 0, of: max(total, 1))
                         await MainActor.run { CityLoadState.shared.progress = fraction }
                     }
@@ -249,7 +277,7 @@ actor CityStore {
                           loadMs: (CFAbsoluteTimeGetCurrent() - t0) * 1000,
                           timeZone: m.timeZone, validBox: valid,
                           tiles: Set(wanted.map { "\($0.i)_\($0.j)" }), metroID: m.id,
-                          downloaded: missing.count)
+                          downloaded: missing.count, extent: m.index.bbox, built: m.index.built)
     }
 
     private func rawTile(_ m: MetroDescriptor, _ t: MetroIndex.Tile) throws -> RawBundle {
@@ -258,7 +286,9 @@ actor CityStore {
             tileOrder.removeAll { $0 == key }; tileOrder.append(key)
             return hit
         }
-        let raw = try RawBundle(contentsOf: m.localDirectory.appendingPathComponent(t.file))
+        let url = m.localDirectory.appendingPathComponent(t.file)
+        let raw = try RawBundle(contentsOf: url)
+        touch(url)
         tileCache[key] = raw
         tileOrder.append(key)
         while tileOrder.count > Self.tileCacheLimit { tileCache[tileOrder.removeFirst()] = nil }
@@ -271,6 +301,129 @@ actor CityStore {
         let grid = try RawBundle(contentsOf: m.localDirectory.appendingPathComponent(far.file)).terrain
         farCache[m.id] = grid
         return grid
+    }
+
+    // MARK: - On-disk cache: ledger, eviction, prefetch (PLAN.md §2 C6)
+
+    /// Downloaded files past this are evicted, least recently used first.
+    static var capBytes: Int {
+        let mb = UserDefaults.standard.integer(forKey: "uiTestCacheCapMB")
+        return (mb > 0 ? mb : 400) * 1_000_000
+    }
+    private var ledger: [String: CacheEntry]?
+    private var ledgerDirty = 0
+    /// Tiles fetched ahead of need by the last prefetch ring, for the debug line.
+    private(set) var prefetched = 0
+    private var prefetchTask: Task<Void, Never>?
+
+    private static var ledgerURL: URL { CityCatalog.downloadsDirectory.appendingPathComponent("ledger.json") }
+
+    private func relative(_ url: URL) -> String {
+        let base = CityCatalog.downloadsDirectory.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(base) ? String(path.dropFirst(base.count + 1)) : path
+    }
+
+    /// The ledger, built from a scan of Cities/ the first time (files already there —
+    /// sideloaded or from an older app version — count by their modification time).
+    private func loadLedger() -> [String: CacheEntry] {
+        if let ledger { return ledger }
+        var out: [String: CacheEntry] = [:]
+        if let data = try? Data(contentsOf: Self.ledgerURL),
+           let entries = try? JSONDecoder().decode([CacheEntry].self, from: data) {
+            for e in entries { out[e.key] = e }
+        } else if let walker = FileManager.default.enumerator(at: CityCatalog.downloadsDirectory,
+                                                              includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) {
+            for case let url as URL in walker where url.pathExtension == "lwbundle" {
+                let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                out[relative(url)] = CacheEntry(key: relative(url), bytes: v?.fileSize ?? 0,
+                                                lastUsed: v?.contentModificationDate ?? .distantPast)
+            }
+        }
+        ledger = out
+        return out
+    }
+
+    private func saveLedger() {
+        guard let ledger, let data = try? JSONEncoder().encode(Array(ledger.values)) else { return }
+        try? data.write(to: Self.ledgerURL, options: .atomic)
+    }
+
+    /// Records a use of a file under Cities/ (bundled files are ignored).
+    func touch(_ url: URL) {
+        guard url.standardizedFileURL.path.hasPrefix(CityCatalog.downloadsDirectory.standardizedFileURL.path) else { return }
+        var l = loadLedger()
+        let key = relative(url)
+        let bytes = l[key]?.bytes ?? ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        l[key] = CacheEntry(key: key, bytes: bytes, lastUsed: Date())
+        ledger = l
+        ledgerDirty += 1
+        if ledgerDirty >= 8 { saveLedger(); ledgerDirty = 0 }
+    }
+
+    /// Total bytes the ledger knows about (debug, tests).
+    var cachedBytes: Int { loadLedger().values.reduce(0) { $0 + $1.bytes } }
+
+    /// Past the cap, delete the least recently used downloads — but only when a server can
+    /// give them back: with no server, sideloaded tiles are the only copy.
+    private func evictIfNeeded() {
+        guard CityCatalog.shared.baseURLIsSet else { return }
+        var l = loadLedger()
+        var protected = Set<String>()
+        if let metro, let id = metro.metroID {
+            for t in metro.tiles { protected.formUnion(l.keys.filter { $0.hasPrefix(id + "/") && $0.hasSuffix("t_\(t).lwbundle") }) }
+            protected.formUnion(l.keys.filter { $0.hasPrefix(id + "/") && $0.hasSuffix("far.lwbundle") })
+        }
+        for single in singles.values { protected.insert(single.id) }
+        for path in fileDownloads.keys { protected.insert(relative(URL(fileURLWithPath: path))) }
+        let gone = CachePolicy.evictions(Array(l.values), capBytes: Self.capBytes, protected: protected)
+        for key in gone {
+            try? FileManager.default.removeItem(at: CityCatalog.downloadsDirectory.appendingPathComponent(key))
+            l[key] = nil
+            for (k, _) in tileCache where k.hasSuffix("/" + (key as NSString).lastPathComponent) { tileCache[k] = nil }
+        }
+        ledger = l
+        if !gone.isEmpty { saveLedger(); Task { await CityCatalog.shared.invalidate() } }
+    }
+
+    /// The ring of tiles just outside a fresh stitch, fetched in the background on Wi-Fi
+    /// only, so a short pan or walk doesn't wait on the network.
+    private func prefetchRing(_ m: MetroDescriptor, around wanted: [MetroIndex.Tile]) {
+        guard let remote = m.remoteDirectory, !wanted.isEmpty,
+              UserDefaults.standard.string(forKey: "uiTestNoPrefetch") == nil else { return }
+        let i0 = wanted.map(\.i).min()! - 1, i1 = wanted.map(\.i).max()! + 1
+        let j0 = wanted.map(\.j).min()! - 1, j1 = wanted.map(\.j).max()! + 1
+        let inner = Set(wanted.map { "\($0.i)_\($0.j)" })
+        let ring = m.index.tiles.filter { $0.i >= i0 && $0.i <= i1 && $0.j >= j0 && $0.j <= j1 && !inner.contains("\($0.i)_\($0.j)") }
+        let fm = FileManager.default
+        let missing = ring.filter { !fm.fileExists(atPath: m.localDirectory.appendingPathComponent($0.file).path) }
+        guard !missing.isEmpty else { return }
+        prefetchTask?.cancel()
+        prefetchTask = Task.detached(priority: .background) {
+            let config = URLSessionConfiguration.default
+            config.allowsExpensiveNetworkAccess = false
+            config.allowsConstrainedNetworkAccess = false
+            let session = URLSession(configuration: config)
+            var got = 0
+            for t in missing {
+                if Task.isCancelled { break }
+                let dest = m.localDirectory.appendingPathComponent(t.file)
+                guard let (tmp, response) = try? await session.download(from: remote.appendingPathComponent(t.file)),
+                      (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
+                try? fm.removeItem(at: dest)
+                if (try? fm.moveItem(at: tmp, to: dest)) != nil {
+                    got += 1
+                    await CityStore.shared.touch(dest)
+                }
+            }
+            await CityStore.shared.finishPrefetch(got)
+        }
+    }
+
+    private func finishPrefetch(_ n: Int) {
+        prefetched = n
+        saveLedger()
+        evictIfNeeded()
     }
 
     func stats(for city: LoadedCity) -> (nodes: Int, edges: Int, buildings: Int, tiles: Int, loadMs: Double) {

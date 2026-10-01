@@ -11,6 +11,11 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_STRICT_CONCURRENCY: minimal
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # Where the apps fetch tiles and send "Request this area" (PLAN.md §2 C7). Empty =
+    # unset (sideloaded tiles only; button hidden). Set when hosting goes live, e.g.
+    #   xcodebuild ... LW_BUNDLE_BASE_URL=https://likewater-tiles.pages.dev/
+    LW_BUNDLE_BASE_URL: ""
+    LW_COVERAGE_REQUEST_URL: ""
 packages:
   LikeWaterEngine:
     path: Engine
@@ -26,6 +31,11 @@ targets:
     dependencies:
       - package: LikeWaterEngine
         product: LikeWaterEngine
+    info:
+      path: Apps/LikeWater/Info.plist
+      properties:
+        LWBundleBaseURL: "$(LW_BUNDLE_BASE_URL)"
+        LWCoverageRequestURL: "$(LW_COVERAGE_REQUEST_URL)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.likewater.app
@@ -46,6 +56,11 @@ targets:
     dependencies:
       - package: LikeWaterEngine
         product: LikeWaterEngine
+    info:
+      path: Apps/SunMap/Info.plist
+      properties:
+        LWBundleBaseURL: "$(LW_BUNDLE_BASE_URL)"
+        LWCoverageRequestURL: "$(LW_COVERAGE_REQUEST_URL)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.likewater.sunmap

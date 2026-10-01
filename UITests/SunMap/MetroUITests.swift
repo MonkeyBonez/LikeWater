@@ -89,4 +89,15 @@ final class MetroUITests: XCTestCase {
         _ = waitForField(containing: "Los Angeles (")
         shoot("metro-30-la-downtown")
     }
+
+    /// The first place built by `build_places.py` (PLAN F): Portland downloads and paints.
+    func testPortlandBuiltByThePipelinePaints() throws {
+        try XCTSkipUnless(available.contains("portland"))
+        launch(center: "45.5231,-122.6765", date: "2026-09-23T20:00:00Z")   // 1 pm PDT
+        _ = waitForField(containing: "Portland (")
+        shoot("metro-40-portland")
+        XCTAssertTrue(stats.label.contains("downloaded)"), stats.label)
+        XCTAssertEqual(app.staticTexts["sunTime"].label, "1:00 PM")
+        XCTAssertTrue(app.staticTexts["sunReadout"].label.contains("el "))
+    }
 }

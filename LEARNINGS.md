@@ -553,6 +553,41 @@ line shows "last walk: predicted · actual" after a GPS walk, and `PaceEstimator
 measured pace 50/50 after 300 m / 3 min and learns across walks. Accuracy goes here once
 the owner has walked a few (PLAN Part 3 #9).
 
+## 12. Loading anywhere: coverage, builds, eviction (2026-09-30)
+
+- **Coverage by the first point was the bug behind "half a screen fails".** Both apps
+  picked the city by `points.first` (the screen centre); now the whole box (centre + four
+  corners, or a walk's two ends) decides, choosing the place with the most overlap, and
+  the field carries `covered`/`partial`. Seattle's north edge now paints its half and says
+  "Only part of this screen has sun data".
+- **Unbuilt is a state, not an error.** Denver shows "No sun data here yet", the nearest
+  built place, the sky and the sun position in **~4.5 s** (UI test, local server); the red
+  "No map data for this area yet." is gone, also for a Like Water walk (no route without
+  tiles — ours-only).
+- **Two status bugs were races, not logic.** "Showing SoMa" was set once and only if the
+  GPS fix beat the map's first region report (it usually doesn't), so it rarely appeared
+  and, when it did, never left; it is now derived (`outsideCity && centerIsFallback &&
+  !userMovedMap`). Adding a 150 ms pan debounce exposed the second: the "Zoom in" status was
+  only set after a recompute, and a slow pinch's last region often needs none — the status
+  now follows the view.
+- **Builds are pinned.** Node ids are row numbers of one build, so a phone must never
+  stitch tiles of two builds. The stitch key carries `buildKey`; a newer server build goes to
+  `Cities/<id>/<buildKey>/`, becomes `.ready` after its first successful stitch, and only
+  then are older copies deleted; a newer build whose tiles 404 falls back to the old one;
+  a server going back to an older build never downgrades the phone
+  (`BuildPinningUITests`, with `Pipeline/fake_rebuild_server.py`).
+- **Eviction only with a server.** LRU over a ledger of downloaded files, 400 MB cap,
+  protecting the current stitch, loaded singles and in-flight downloads. With a 30 MB cap,
+  Seattle → LA → New York leaves the cache under 30 MB and Seattle (least recent) is the
+  one re-downloaded. Without a configured server nothing is evicted: sideloaded tiles are
+  the only copy.
+- **Prefetch makes short pans free.** After a stitch the surrounding ring downloads in the
+  background on Wi-Fi only; a 2 km pan in Seattle then needed **0 downloads**. The cost is
+  disk: Seattle went from ~13 MB to ~43 MB with its ring.
+- **Pages would have refused today's `Server/`**: `sanfrancisco.lwbundle` is 31.9 MiB,
+  over Cloudflare Pages' 25 MiB per-file limit (`build_places.py --dry-run` checks the
+  limits). Fixed in D.
+
 ## 7. Testing lessons that cost us
 
 - **Two UI tests passed for a week while testing nothing.** An

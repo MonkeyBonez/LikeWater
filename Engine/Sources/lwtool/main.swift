@@ -88,31 +88,25 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "sky" {
 func loadCity() throws -> CityBundle {
     if let dir = option("metro") {
         let base = URL(fileURLWithPath: dir)
-        guard let data = try? Data(contentsOf: base.appendingPathComponent("metro.json")),
-              let index = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tLat = index["tileLat"] as? Double, let tLon = index["tileLon"] as? Double,
-              let tiles = index["tiles"] as? [[String: Any]] else { fail("no metro.json in \(dir)") }
+        guard let index = try? MetroIndex.load(from: base.appendingPathComponent("metro.json")) else {
+            fail("no metro.json in \(dir)")
+        }
         let pts = ["center", "from", "to"].compactMap { option($0) }.map { coordinate($0, "point") }
         guard !pts.isEmpty else { fail("--metro needs --center or --from/--to") }
         let reach = Double(option("reach") ?? "2500") ?? 2500
         let box = BBox.around(pts.map { ($0.lat, $0.lon) }, paddingMeters: reach)
-        let i0 = Int((box.minLat / tLat).rounded(.down)), i1 = Int((box.maxLat / tLat).rounded(.down))
-        let j0 = Int((box.minLon / tLon).rounded(.down)), j1 = Int((box.maxLon / tLon).rounded(.down))
-        let chosen = tiles.filter {
-            let i = $0["i"] as! Int, j = $0["j"] as! Int
-            return i >= i0 && i <= i1 && j >= j0 && j <= j1
-        }
+        let chosen = index.tiles(intersecting: box)
         guard !chosen.isEmpty else { fail("no tiles near those points") }
         let t0 = CFAbsoluteTimeGetCurrent()
-        let raws = try chosen.map { try RawBundle(contentsOf: base.appendingPathComponent($0["file"] as! String)) }
+        let raws = try chosen.map { try RawBundle(contentsOf: base.appendingPathComponent($0.file)) }
         let t1 = CFAbsoluteTimeGetCurrent()
         var far: TerrainGrid? = nil
-        if !CommandLine.arguments.contains("--no-far"), let f = index["far"] as? [String: Any], let file = f["file"] as? String {
-            far = try RawBundle(contentsOf: base.appendingPathComponent(file)).terrain
+        if !CommandLine.arguments.contains("--no-far"), let f = index.far {
+            far = try RawBundle(contentsOf: base.appendingPathComponent(f.file)).terrain
         }
         let city = try TileStitcher.stitch(raws, farTerrain: far)
         let t2 = CFAbsoluteTimeGetCurrent()
-        let bytes = chosen.reduce(0) { $0 + ($1["bytes"] as! Int) }
+        let bytes = chosen.reduce(0) { $0 + $1.bytes }
         FileHandle.standardError.write(Data(String(format: "stitched %d tiles (%.1f MB): %d nodes, %d edges, %d buildings; read %.0f ms, stitch %.0f ms\n",
             chosen.count, Double(bytes) / 1e6, city.graph.nodeCount, city.graph.edgeCount,
             city.buildings.count, (t1 - t0) * 1000, (t2 - t1) * 1000).utf8))

@@ -44,13 +44,32 @@ struct SunMapScreen: View {
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(.ultraThinMaterial, in: Capsule())
                 .accessibilityIdentifier("cityLoadStatus")
-            } else if model.field == nil && model.error == nil {
+            } else if model.field == nil && model.error == nil && model.notCovered == nil {
                 HStack(spacing: 8) {
                     ProgressView()
                     Text("Loading city…").font(.caption)
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(.ultraThinMaterial, in: Capsule())
+            }
+            if model.notCovered != nil {
+                VStack(spacing: 6) {
+                    Text("No sun data here yet").font(.subheadline.weight(.semibold))
+                    if let detail = model.coverageDetail {
+                        Text(detail).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                    if model.canRequestCoverage {
+                        Button(model.requestSent ? "Requested — thanks" : "Request this area") { model.requestCoverage() }
+                            .buttonStyle(.borderedProminent).font(.caption)
+                            .disabled(model.requestSent)
+                            .accessibilityIdentifier("requestCoverageButton")
+                    }
+                }
+                .padding(12)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("coverageBanner")
             }
             if !model.status.isEmpty {
                 Text(model.status)
@@ -117,7 +136,7 @@ struct SunMapScreen: View {
             }
 
             if let field = model.field {
-                Text("\(field.city)\(field.tiles > 0 ? " (\(field.tiles) tiles\(field.downloaded > 0 ? ", \(field.downloaded) downloaded" : ""))" : "") · \(field.scoredEdges) edges scored in \(String(format: "%.0f", field.computeMs)) ms · \(field.sunnyCount) sunny / \(field.mixedCount) mixed / \(field.shadedCount) shaded · sky \(String(format: "%.2f", model.beamStrength)) \(field.skySource)")
+                Text("\(field.city)\(field.tiles > 0 ? " (\(field.tiles) tiles\(field.downloaded > 0 ? ", \(field.downloaded) downloaded" : ""))" : "") · \(field.scoredEdges) edges scored in \(String(format: "%.0f", field.computeMs)) ms · \(field.sunnyCount) sunny / \(field.mixedCount) mixed / \(field.shadedCount) shaded · sky \(String(format: "%.2f", model.beamStrength)) \(field.skySource)\(field.built.map { " · build " + MetroIndex.buildKey($0) } ?? "") · cache \(field.cacheBytes / 1_000_000) MB")
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("sunStats")

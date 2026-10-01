@@ -82,7 +82,29 @@ struct ContentView: View {
                 .background(.ultraThinMaterial, in: Capsule())
                 .accessibilityIdentifier("ambientError")
         }
-        if model.outsideCity {
+        if model.notCovered != nil {
+            VStack(spacing: 6) {
+                Text("No sun data here yet").font(.subheadline.weight(.semibold))
+                if let detail = model.coverageDetail {
+                    Text(detail).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                if let sky = model.notCovered?.sky, model.notCovered?.sun?.isUp == true {
+                    Text(sky.summary).font(.caption).accessibilityIdentifier("skyStatus")
+                }
+                if model.canRequestCoverage {
+                    Button(model.requestSent ? "Requested — thanks" : "Request this area") { model.requestCoverage() }
+                        .buttonStyle(.borderedProminent).font(.caption)
+                        .disabled(model.requestSent)
+                        .accessibilityIdentifier("requestCoverageButton")
+                }
+            }
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .padding(.horizontal)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("coverageBanner")
+        }
+        if model.showingDemoArea {
             Text("No map data where you are — using the SoMa demo position")
                 .font(.caption)
                 .padding(.horizontal, 12).padding(.vertical, 7)

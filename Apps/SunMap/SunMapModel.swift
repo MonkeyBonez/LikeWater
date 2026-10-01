@@ -29,6 +29,10 @@ final class SunMapModel: ObservableObject {
     var userMovedMap = false
     private var visibleBox: BBox?
     private var scoredBox: BBox?
+    private var panDebounce: Task<Void, Never>?
+    /// Set when nothing is built under the screen: why, plus the sky and sun, which work anywhere.
+    @Published var notCovered: (state: CoverageState, sky: SkyCondition?, sun: SolarPosition)?
+    @Published var requestSent = false
 
     /// PRD: redraw when the map centre moves more than this, and the field covers 400 m.
     static let recomputeDistance: Double = 200
@@ -82,7 +86,10 @@ final class SunMapModel: ObservableObject {
                 self.centerIsFallback = false
                 self.outsideCity = false
             } else {
-                guard self.center == nil else { return }
+                // Unbuilt where the user is: stay on (or move to) the demo area and say so.
+                // The map usually reports its starting region before the fix, so "center is
+                // set" doesn't mean the user chose it.
+                guard self.center == nil || self.centerIsFallback else { return }
                 self.center = Self.fallbackCenter
                 self.centerIsFallback = true
                 self.outsideCity = true
@@ -116,7 +123,20 @@ final class SunMapModel: ObservableObject {
         center = region.center
         let visible = SunArea.box(region)
         visibleBox = visible
-        if SunArea.needsRecompute(visible: visible, scored: scoredBox) { recompute(force: true) }
+        // A swipe reports several regions; score only where the map settles.
+        panDebounce?.cancel()
+        panDebounce = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if self.notCovered != nil || SunArea.needsRecompute(visible: visible, scored: self.scoredBox) {
+                self.recompute(force: true)
+            } else {
+                // The field still covers the screen, but the screen itself changed (a pinch
+                // that ends past the cap): the status follows the view, not the last score.
+                self.clipped = SunArea.scoring(for: visible).clipped
+                self.updateStatus()
+            }
+        }
     }
 
     func setDate(_ date: Date) {
@@ -162,24 +182,31 @@ final class SunMapModel: ObservableObject {
                                                           skyMode: self.skyMode)
                 guard !Task.isCancelled else { return }
                 self.field = result
+                self.notCovered = nil
                 self.lastComputedCenter = center
                 self.scoredBox = area.box
                 self.clipped = area.clipped
                 self.daylight = await self.service.daylightWindow(at: center, on: self.selectedDate)
                 self.overlayVersion += 1
                 self.error = nil
-                if !result.sun.isUp {
-                    self.status = "Sun is down."
-                } else if self.outsideCity {
-                    self.status = "No map data where you are — showing SoMa"
-                } else if area.clipped {
-                    self.status = "Zoom in to see the sun on every street"
-                } else {
-                    self.status = ""
-                }
+                self.updateStatus()
                 self.skyStatus = Self.skyLine(for: result)
                 self.cityName = result.city
+            } catch SunServiceError.notCovered(let state, let sky, let sun, _) {
+                guard !Task.isCancelled else { return }
+                self.field = nil
+                self.scoredBox = nil
+                self.notCovered = (state, sky, sun)
+                self.requestSent = false
+                self.error = nil
+                self.status = ""
+                self.skyStatus = sun.isUp ? (sky?.summary ?? "No forecast") : ""
+                self.daylight = await self.service.daylightWindow(at: center, on: self.selectedDate)
+                self.overlayVersion += 1
+            } catch is CancellationError {
+                return
             } catch {
+                guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription
             }
             self.isComputing = false
@@ -201,13 +228,48 @@ final class SunMapModel: ObservableObject {
         return line
     }
 
+    /// One status line, from the current state: sun down, demo area, zoomed out past the
+    /// cap, or a screen only partly covered.
+    func updateStatus() {
+        guard let field else { status = ""; return }
+        if !field.sun.isUp { status = "Sun is down." }
+        else if showingDemoArea { status = "No map data where you are — showing SoMa" }
+        else if clipped { status = "Zoom in to see the sun on every street" }
+        else if field.coverage == .partial { status = "Only part of this screen has sun data" }
+        else { status = "" }
+    }
+
+    /// The demo area is on screen because the user's own position has no data — and they
+    /// haven't moved the map since. Derived, so it can't go stale after a pan.
+    var showingDemoArea: Bool { outsideCity && centerIsFallback && !userMovedMap }
+
+    /// "No sun data here yet" + the nearest built place.
+    var coverageDetail: String? {
+        guard let nc = notCovered else { return nil }
+        switch nc.state {
+        case .notBuilt(let nearest?, let km?):
+            return String(format: "Nearest with sun data: %@, %.0f km", nearest, km)
+        case .noServer:
+            return "This phone has no map data here and no bundle server is configured."
+        default:
+            return "We haven't built this area yet."
+        }
+    }
+
+    var canRequestCoverage: Bool { CoverageRequest.url != nil }
+
+    func requestCoverage() {
+        guard let c = center else { return }
+        Task { self.requestSent = await CoverageRequest.send(c) }
+    }
+
     /// 0…1 beam strength driving the palette; 1 when there is no forecast.
-    var beamStrength: Double { field?.sky?.beamStrength ?? 1 }
+    var beamStrength: Double { field?.sky?.beamStrength ?? notCovered?.sky?.beamStrength ?? 1 }
 
     var readout: String {
-        guard let field else { return "—" }
-        guard field.sun.isUp else { return "Sun is down." }
-        return String(format: "az %.0f°  ·  el %.0f°", field.sun.azimuth, field.sun.elevation)
+        guard let sun = field?.sun ?? notCovered?.sun else { return "—" }
+        guard sun.isUp else { return "Sun is down." }
+        return String(format: "az %.0f°  ·  el %.0f°", sun.azimuth, sun.elevation)
     }
 
     /// The city's time zone once a field has loaded; the device's until then.

@@ -24,23 +24,16 @@ final class MetroTests: XCTestCase {
     private func stitch(_ id: String, around points: [(Double, Double)], reach: Double = 2_500,
                         far: Bool = true) throws -> Loaded {
         let dir = Self.root.appendingPathComponent(id)
-        guard let data = try? Data(contentsOf: dir.appendingPathComponent("metro.json")),
-              let index = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let index = try? MetroIndex.load(from: dir.appendingPathComponent("metro.json")) else {
             throw XCTSkip("\(id) not built yet")
         }
-        let tLat = index["tileLat"] as! Double, tLon = index["tileLon"] as! Double
         let box = BBox.around(points.map { (lat: $0.0, lon: $0.1) }, paddingMeters: reach)
-        let i0 = Int((box.minLat / tLat).rounded(.down)), i1 = Int((box.maxLat / tLat).rounded(.down))
-        let j0 = Int((box.minLon / tLon).rounded(.down)), j1 = Int((box.maxLon / tLon).rounded(.down))
-        let chosen = (index["tiles"] as! [[String: Any]]).filter {
-            let i = $0["i"] as! Int, j = $0["j"] as! Int
-            return i >= i0 && i <= i1 && j >= j0 && j <= j1
-        }
+        let chosen = index.tiles(intersecting: box)
         let t0 = CFAbsoluteTimeGetCurrent()
-        let raws = try chosen.map { try RawBundle(contentsOf: dir.appendingPathComponent($0["file"] as! String)) }
+        let raws = try chosen.map { try RawBundle(contentsOf: dir.appendingPathComponent($0.file)) }
         var farGrid: TerrainGrid? = nil
-        if far, let f = index["far"] as? [String: Any] {
-            farGrid = try RawBundle(contentsOf: dir.appendingPathComponent(f["file"] as! String)).terrain
+        if far, let f = index.far {
+            farGrid = try RawBundle(contentsOf: dir.appendingPathComponent(f.file)).terrain
         }
         let t1 = CFAbsoluteTimeGetCurrent()
         let city = try TileStitcher.stitch(raws, farTerrain: farGrid)

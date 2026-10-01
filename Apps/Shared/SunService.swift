@@ -31,6 +31,19 @@ struct SunField: Sendable {
     /// Tiles stitched for this field (0 for a single-file city).
     var tiles: Int = 0
     var downloaded: Int = 0
+    /// `.partial` when part of the screen is outside the place's data.
+    var coverage: CoverageState = .covered
+    /// The metro build painted (nil for a single-file city), and the on-disk cache size.
+    var built: String?
+    var cacheBytes: Int = 0
+    var prefetched: Int = 0
+}
+
+/// Nothing built here. The sky and the sun still work anywhere, so they come along.
+enum SunServiceError: Error, LocalizedError {
+    case notCovered(CoverageState, sky: SkyCondition?, sun: SolarPosition, timeZone: TimeZone?)
+
+    var errorDescription: String? { "No sun data here yet." }
 }
 
 /// How the user wants the sky handled.
@@ -118,8 +131,28 @@ actor SunService {
         let center = CLLocationCoordinate2D(latitude: box.centerLat, longitude: box.centerLon)
         let corners = [center,
                        CLLocationCoordinate2D(latitude: box.minLat, longitude: box.minLon),
+                       CLLocationCoordinate2D(latitude: box.minLat, longitude: box.maxLon),
+                       CLLocationCoordinate2D(latitude: box.maxLat, longitude: box.minLon),
                        CLLocationCoordinate2D(latitude: box.maxLat, longitude: box.maxLon)]
-        let city = try await CityStore.shared.city(covering: corners)
+        let city: LoadedCity
+        do {
+            city = try await CityStore.shared.city(covering: corners)
+        } catch CityCatalogError.noCoverage, CityCatalogError.noServer {
+            // Not built here: say so calmly, with the sky and sun that work anywhere.
+            let sun = Solar.position(latitude: center.latitude, longitude: center.longitude, date: date)
+            let field: SkyField?
+            if let preset = skyMode.preset ?? WeatherService.launchPreset() {
+                field = WeatherService.field(for: preset, around: center, at: date)
+            } else {
+                field = await WeatherService.shared.sky(around: center, for: date)
+            }
+            let sky = field?.condition(latitude: center.latitude, longitude: center.longitude,
+                                       at: date, sunElevation: sun.elevation)
+            let state = await CityCatalog.shared.coverageState(for: box)
+            throw SunServiceError.notCovered(state.hasData ? .notBuilt(nearest: nil, km: nil) : state,
+                                             sky: sky, sun: sun, timeZone: nil)
+        }
+        try Task.checkCancellation()
         let graph = city.bundle.graph
         // Take the scorer out while mutating it, so its scratch buffer is not copied.
         var scorer = (self.scorer?.id == city.id ? self.scorer?.scorer : nil) ?? SunScorer(buildings: city.bundle.buildings)
@@ -168,7 +201,9 @@ actor SunService {
                         sunnyCount: sunny, mixedCount: mixed, shadedCount: shaded,
                         sky: sky, skySpread: spread, skySource: source,
                         timeZone: city.timeZone, tiles: city.tiles.count,
-                        downloaded: city.downloaded)
+                        downloaded: city.downloaded, coverage: city.coverage(of: box),
+                        built: city.built, cacheBytes: await CityStore.shared.cachedBytes,
+                        prefetched: await CityStore.shared.prefetched)
     }
 
     func daylightWindow(at center: CLLocationCoordinate2D, on date: Date) -> (sunrise: Date, sunset: Date)? {

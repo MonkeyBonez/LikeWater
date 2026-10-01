@@ -36,58 +36,30 @@ struct RemoteManifest: Codable, Sendable {
         var minLat: Double, minLon: Double, maxLat: Double, maxLon: Double
         var bytes: Int
         var tiles: Int?
+        /// The build this entry points at (`MetroIndex.built`).
+        var built: String?
         var bbox: BBox { BBox(minLat: minLat, minLon: minLon, maxLat: maxLat, maxLon: maxLon) }
+        var buildKey: String { MetroIndex.buildKey(built) }
     }
     var cities: [City]
     var metros: [Metro]?
 }
 
-/// `<metro>/metro.json`, written by `Pipeline/build_metro.py`.
-struct MetroIndex: Codable, Sendable {
-    struct Tile: Codable, Sendable, Hashable {
-        var i: Int
-        var j: Int
-        var file: String
-        var bytes: Int
-        var nodes: Int?
-        var edges: Int?
-        var buildings: Int?
-    }
-    struct FileRef: Codable, Sendable {
-        var file: String
-        var bytes: Int
-    }
-    var id: String
-    var name: String
-    var timezone: String?
-    var tileLat: Double
-    var tileLon: Double
-    var minLat: Double, minLon: Double, maxLat: Double, maxLon: Double
-    var demo: [Double]?
-    var far: FileRef?
-    var bytes: Int
-    var tiles: [Tile]
+extension MetroIndex {
+    func tile(containing c: CLLocationCoordinate2D) -> Tile? { tile(containingLat: c.latitude, lon: c.longitude) }
+}
 
-    var bbox: BBox { BBox(minLat: minLat, minLon: minLon, maxLat: maxLat, maxLon: maxLon) }
+/// How much of a box (a screen, or a walk's two ends) has sun data.
+enum CoverageState: Equatable, Sendable {
+    case covered
+    /// Part of the box is outside the place's bounds.
+    case partial
+    /// Nothing built here; the nearest built place, if any is known.
+    case notBuilt(nearest: String?, km: Double?)
+    /// Nothing on the phone covers it and no bundle server is configured to ask.
+    case noServer
 
-    func tileBox(_ t: Tile) -> BBox {
-        BBox(minLat: Double(t.i) * tileLat, minLon: Double(t.j) * tileLon,
-             maxLat: Double(t.i + 1) * tileLat, maxLon: Double(t.j + 1) * tileLon)
-    }
-
-    /// The tile holding a point, if the metro has one there (tiles exist only where
-    /// the city has streets, so this is also the coverage test).
-    func tile(containing c: CLLocationCoordinate2D) -> Tile? {
-        let i = Int((c.latitude / tileLat).rounded(.down)), j = Int((c.longitude / tileLon).rounded(.down))
-        return tiles.first { $0.i == i && $0.j == j }
-    }
-
-    /// Every tile intersecting a box.
-    func tiles(intersecting box: BBox) -> [Tile] {
-        let i0 = Int((box.minLat / tileLat).rounded(.down)), i1 = Int((box.maxLat / tileLat).rounded(.down))
-        let j0 = Int((box.minLon / tileLon).rounded(.down)), j1 = Int((box.maxLon / tileLon).rounded(.down))
-        return tiles.filter { $0.i >= i0 && $0.i <= i1 && $0.j >= j0 && $0.j <= j1 }
-    }
+    var hasData: Bool { self == .covered || self == .partial }
 }
 
 /// A metro the app knows about: its index plus where its files live.
@@ -97,10 +69,61 @@ struct MetroDescriptor: Sendable {
     var localDirectory: URL
     /// Server directory for the tiles, when a bundle server is configured.
     var remoteDirectory: URL?
+    /// An older build of the same metro that is complete on the phone: what keeps serving
+    /// if this (newer) build can't be fetched.
+    var fallbackDirectory: URL?
+    var fallbackIndex: MetroIndex?
     var id: String { index.id }
     var name: String { index.name }
+    var buildKey: String { index.buildKey }
     var timeZone: TimeZone? { index.timezone.flatMap(TimeZone.init(identifier:)) }
     func covers(_ c: CLLocationCoordinate2D) -> Bool { index.tile(containing: c) != nil }
+    /// nil when the box misses the metro entirely.
+    func coverage(of box: BBox) -> CoverageState? {
+        guard index.intersects(box) else { return nil }
+        return index.extendsBeyond(box) ? .partial : .covered
+    }
+    var fallback: MetroDescriptor? {
+        guard let dir = fallbackDirectory, let idx = fallbackIndex else { return nil }
+        return MetroDescriptor(index: idx, localDirectory: dir, remoteDirectory: nil)
+    }
+}
+
+extension CityDescriptor {
+    func coverage(of box: BBox) -> CoverageState? {
+        guard bbox.intersects(box) else { return nil }
+        return bbox.contains(box) ? .covered : .partial
+    }
+}
+
+/// "Request this area": counts a 0.1° cell on the owner's coverage endpoint. Sends nothing
+/// unless `LWCoverageRequestURL` (or `-coverageRequestURL`) is configured.
+enum CoverageRequest {
+    static var url: URL? {
+        if let raw = UserDefaults.standard.string(forKey: "coverageRequestURL"), let u = URL(string: raw) { return u }
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "LWCoverageRequestURL") as? String,
+              !raw.isEmpty, let u = URL(string: raw) else { return nil }
+        return u
+    }
+
+    static func cell(_ c: CLLocationCoordinate2D) -> String {
+        String(format: "%.1f,%.1f", (c.latitude * 10).rounded() / 10, (c.longitude * 10).rounded() / 10)
+    }
+
+    /// Returns true when the endpoint accepted it.
+    static func send(_ c: CLLocationCoordinate2D) async -> Bool {
+        // Kept locally too: the input for Pipeline/requests_to_places.py before a Worker exists.
+        var asked = UserDefaults.standard.stringArray(forKey: "requestedCells") ?? []
+        asked.append(cell(c)); UserDefaults.standard.set(asked, forKey: "requestedCells")
+        guard let url else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["cell": cell(c)])
+        request.timeoutInterval = 10
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+        return (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+    }
 }
 
 enum CityCatalogError: Error, LocalizedError {
@@ -144,7 +167,7 @@ actor CityCatalog {
         if let raw = defaults.string(forKey: "bundleBaseURL"), let u = URL(string: raw) {
             baseURL = u
         } else if let raw = Bundle.main.object(forInfoDictionaryKey: "LWBundleBaseURL") as? String,
-                  let u = URL(string: raw) {
+                  !raw.isEmpty, let u = URL(string: raw) {
             baseURL = u
         } else {
             baseURL = nil
@@ -176,6 +199,8 @@ actor CityCatalog {
         return Dictionary(uniqueKeysWithValues: manifest.cities.map { ($0.file, $0) })
     }()
 
+    nonisolated var baseURLIsSet: Bool { baseURL != nil }
+
     /// Forget cached listings (after a download).
     func invalidate() { localCache = nil; metroCache = nil }
 
@@ -203,6 +228,15 @@ actor CityCatalog {
         return out
     }
 
+    /// The single city most of a box falls in (prefer downloaded, then most overlap).
+    func localCity(covering box: BBox) -> CityDescriptor? {
+        local().filter { $0.bbox.intersects(box) }.sorted {
+            if $0.isBundled != $1.isBundled { return !$0.isBundled }
+            let a = $0.bbox.overlapArea(box), b = $1.bbox.overlapArea(box)
+            return a != b ? a > b : area($0.bbox) < area($1.bbox)
+        }.first
+    }
+
     func localCity(covering c: CLLocationCoordinate2D) -> CityDescriptor? {
         // Prefer a downloaded (fresher) copy over a shipped one; then the smallest box,
         // which is the most specific city when two boxes overlap.
@@ -214,27 +248,62 @@ actor CityCatalog {
 
     private func area(_ b: BBox) -> Double { (b.maxLat - b.minLat) * (b.maxLon - b.minLon) }
 
-    /// Metros on this device: `<id>/metro.json` under Application Support/Cities
-    /// (downloaded or sideloaded) or inside the app bundle.
+    /// Metros on this device, newest usable build per id. Layouts:
+    ///   Cities/<id>/metro.json              sideloaded by install_phone.sh (always complete)
+    ///   Cities/<id>/<buildKey>/metro.json   fetched from the server; `.ready` once a stitch
+    ///                                       from it succeeded
+    /// A build without `.ready` is only used when no ready build exists.
     func localMetros() -> [MetroDescriptor] {
         if let metroCache { return metroCache }
-        var out: [MetroDescriptor] = []
-        var roots = [Self.downloadsDirectory]
-        if let resources = Bundle.main.resourceURL { roots.append(resources) }
-        for root in roots {
-            let dirs = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
-            for dir in dirs {
-                let indexURL = dir.appendingPathComponent("metro.json")
-                guard let data = try? Data(contentsOf: indexURL),
-                      let index = try? JSONDecoder().decode(MetroIndex.self, from: data),
-                      !out.contains(where: { $0.id == index.id }) else { continue }
-                let local = Self.downloadsDirectory.appendingPathComponent(index.id, isDirectory: true)
-                out.append(MetroDescriptor(index: index, localDirectory: root == Self.downloadsDirectory ? dir : local,
-                                           remoteDirectory: baseURL?.appendingPathComponent(index.id, isDirectory: true)))
+        struct Found { var index: MetroIndex; var dir: URL; var ready: Bool }
+        var found: [String: [Found]] = [:]
+        let fm = FileManager.default
+        func consider(_ dir: URL, ready: Bool) {
+            guard let index = try? MetroIndex.load(from: dir.appendingPathComponent("metro.json")) else { return }
+            found[index.id, default: []].append(Found(index: index, dir: dir, ready: ready))
+        }
+        for idDir in (try? fm.contentsOfDirectory(at: Self.downloadsDirectory, includingPropertiesForKeys: nil)) ?? [] {
+            consider(idDir, ready: true)
+            for build in (try? fm.contentsOfDirectory(at: idDir, includingPropertiesForKeys: nil)) ?? [] {
+                consider(build, ready: fm.fileExists(atPath: build.appendingPathComponent(".ready").path))
             }
         }
-        metroCache = out
-        return out
+        if let resources = Bundle.main.resourceURL {
+            for dir in (try? fm.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil)) ?? [] {
+                guard let index = try? MetroIndex.load(from: dir.appendingPathComponent("metro.json")) else { continue }
+                let local = Self.downloadsDirectory.appendingPathComponent(index.id).appendingPathComponent(index.buildKey)
+                found[index.id, default: []].append(Found(index: index, dir: local, ready: true))
+            }
+        }
+        var out: [MetroDescriptor] = []
+        for (_, builds) in found {
+            let sorted = builds.sorted { $0.index.isNewer(than: $1.index) }
+            guard let pick = sorted.first(where: \.ready) ?? sorted.first else { continue }
+            out.append(MetroDescriptor(index: pick.index, localDirectory: pick.dir,
+                                       remoteDirectory: baseURL?.appendingPathComponent(pick.index.id, isDirectory: true)))
+        }
+        metroCache = out.sorted { $0.id < $1.id }
+        return metroCache!
+    }
+
+    /// After a stitch from `buildKey` succeeded: mark it ready and delete every other build
+    /// of the metro (sibling build directories and a flat sideloaded copy), never the one
+    /// in use.
+    func markReady(metro id: String, directory: URL) {
+        let fm = FileManager.default
+        let idDir = Self.downloadsDirectory.appendingPathComponent(id, isDirectory: true)
+        guard directory.standardizedFileURL.deletingLastPathComponent() == idDir.standardizedFileURL else { return }
+        let marker = directory.appendingPathComponent(".ready")
+        guard !fm.fileExists(atPath: marker.path) else { return }
+        fm.createFile(atPath: marker.path, contents: Data())
+        for item in (try? fm.contentsOfDirectory(at: idDir, includingPropertiesForKeys: [.isDirectoryKey])) ?? [] {
+            if item.standardizedFileURL == directory.standardizedFileURL { continue }
+            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDir || item.pathExtension == "lwbundle" || item.lastPathComponent == "metro.json" {
+                try? fm.removeItem(at: item)
+            }
+        }
+        metroCache = nil
     }
 
     func manifest() async throws -> RemoteManifest {
@@ -259,26 +328,70 @@ actor CityCatalog {
 
     /// Any metro covering a point: on the device first, then the server's.
     func metro(covering c: CLLocationCoordinate2D) async -> MetroDescriptor? {
-        if let hit = localMetros().first(where: { $0.covers(c) }) { return hit }
-        guard let baseURL, let manifest = try? await manifest() else { return nil }
-        for entry in manifest.metros ?? [] where entry.bbox.contains(lat: c.latitude, lon: c.longitude) {
-            let metro: MetroDescriptor
-            if let cached = remoteMetroCache[entry.id] {
-                metro = cached
-            } else {
-                guard let (data, _) = try? await URLSession.shared.data(from: baseURL.appendingPathComponent(entry.index)),
-                      let index = try? JSONDecoder().decode(MetroIndex.self, from: data) else { continue }
-                let local = Self.downloadsDirectory.appendingPathComponent(index.id, isDirectory: true)
-                try? FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
-                try? data.write(to: local.appendingPathComponent("metro.json"))
-                metro = MetroDescriptor(index: index, localDirectory: local,
-                                        remoteDirectory: baseURL.appendingPathComponent(index.id, isDirectory: true))
-                remoteMetroCache[entry.id] = metro
-                metroCache = nil
-            }
-            if metro.covers(c) { return metro }
+        guard let m = await metro(covering: BBox(minLat: c.latitude, minLon: c.longitude,
+                                                 maxLat: c.latitude, maxLon: c.longitude)),
+              m.covers(c) else { return nil }
+        return m
+    }
+
+    /// The metro most of a box falls in. The phone's copy wins unless the server lists a
+    /// newer build, which is then fetched into its own directory with the phone's copy
+    /// kept as the fallback.
+    func metro(covering box: BBox) async -> MetroDescriptor? {
+        let locals = localMetros().filter { $0.index.intersects(box) }
+            .sorted { $0.index.bbox.overlapArea(box) > $1.index.bbox.overlapArea(box) }
+        guard let baseURL, let manifest = try? await manifest() else { return locals.first }
+        let entries = (manifest.metros ?? []).filter { $0.bbox.intersects(box) }
+            .sorted { $0.bbox.overlapArea(box) > $1.bbox.overlapArea(box) }
+        guard let entry = entries.first else { return locals.first }
+        if let local = locals.first(where: { $0.id == entry.id }),
+           !MetroIndex.isNewer(entry.buildKey, than: local.buildKey) {
+            return local
         }
-        return nil
+        if let local = locals.first, local.id != entry.id,
+           local.index.bbox.overlapArea(box) >= entry.bbox.overlapArea(box) {
+            return local
+        }
+        let cacheKey = entry.id + "@" + entry.buildKey
+        if let cached = remoteMetroCache[cacheKey] { return cached }
+        guard let (data, response) = try? await URLSession.shared.data(from: baseURL.appendingPathComponent(entry.index)),
+              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+              let index = try? JSONDecoder().decode(MetroIndex.self, from: data) else { return locals.first }
+        let dir = Self.downloadsDirectory.appendingPathComponent(index.id, isDirectory: true)
+            .appendingPathComponent(index.buildKey, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: dir.appendingPathComponent("metro.json"))
+        let older = locals.first { $0.id == index.id && $0.localDirectory.standardizedFileURL != dir.standardizedFileURL }
+        let metro = MetroDescriptor(index: index, localDirectory: dir,
+                                    remoteDirectory: baseURL.appendingPathComponent(index.id, isDirectory: true),
+                                    fallbackDirectory: older?.localDirectory, fallbackIndex: older?.index)
+        remoteMetroCache[cacheKey] = metro
+        metroCache = nil
+        return metro
+    }
+
+    func remoteCity(covering box: BBox) async throws -> RemoteManifest.City? {
+        try await manifest().cities.filter { $0.bbox.intersects(box) }
+            .max { $0.bbox.overlapArea(box) < $1.bbox.overlapArea(box) }
+    }
+
+    /// Why a box has no data, and the nearest place that has some.
+    func coverageState(for box: BBox) async -> CoverageState {
+        var places: [(String, BBox)] = local().map { ($0.name, $0.bbox) } + localMetros().map { ($0.name, $0.index.bbox) }
+        let manifest = try? await manifest()
+        places += (manifest?.metros ?? []).map { ($0.name, $0.bbox) } + (manifest?.cities ?? []).map { ($0.name, $0.bbox) }
+        if places.contains(where: { $0.1.intersects(box) }) {
+            return places.contains(where: { $0.1.contains(box) }) ? .covered : .partial
+        }
+        if baseURL == nil && places.isEmpty { return .noServer }
+        let c = (box.centerLat, box.centerLon)
+        func distance(_ b: BBox) -> Double {
+            let lat = min(max(c.0, b.minLat), b.maxLat), lon = min(max(c.1, b.minLon), b.maxLon)
+            return haversineMeters(c.0, c.1, lat, lon)
+        }
+        let nearest = places.min { distance($0.1) < distance($1.1) }
+        let state = CoverageState.notBuilt(nearest: nearest?.0, km: nearest.map { distance($0.1) / 1000 })
+        return baseURL == nil && manifest == nil ? (nearest == nil ? .noServer : state) : state
     }
 
     /// Does anything, here or on the server, cover this point? Cheap after the first call.

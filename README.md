@@ -84,6 +84,21 @@ version 2 plus a per-node global id. A phone without a server can be given a met
 directly: copy `Server/<id>/` into the app's `Library/Application Support/Cities/<id>/`
 (`xcrun devicectl device copy to --domain-type appDataContainer …`).
 
+## Coverage, builds and eviction
+
+- **Which place**: the box spanned by the screen's corners (or a walk's two ends) picks the
+  place most of it falls in; a field is `covered` or `partial`; nothing built → a banner
+  ("No sun data here yet", nearest built place, sky kept) and, when `LWCoverageRequestURL`
+  is set, "Request this area".
+- **Builds**: `metro.json` and the manifest carry `built`; server builds land in
+  `Cities/<id>/<buildKey>/`, sideloads in `Cities/<id>/`. A new build serves after its first
+  successful stitch (`.ready`); then older copies are deleted. Never downgraded.
+- **Cache**: `Cities/ledger.json`, LRU, 400 MB (`-uiTestCacheCapMB`), only when a server
+  can give files back; the ring around each stitch is prefetched on Wi-Fi.
+- **Config**: `LW_BUNDLE_BASE_URL` / `LW_COVERAGE_REQUEST_URL` build settings → Info.plist
+  `LWBundleBaseURL` / `LWCoverageRequestURL` (empty = unset). `-bundleBaseURL` and
+  `-coverageRequestURL` override them at launch.
+
 ## The route
 
 Inside the corridor Like Water suggests one route (PLAN.md §1.3–1.5, LEARNINGS §11):

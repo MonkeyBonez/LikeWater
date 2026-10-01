@@ -75,13 +75,49 @@ final class AppModel: ObservableObject {
 
     var showingAmbient: Bool { destination == nil && ambient != nil }
 
+    /// Nothing built under the screen or the walk: why, plus the sky and sun (they work anywhere).
+    @Published var notCovered: (state: CoverageState, sky: SkyCondition?, sun: SolarPosition?)?
+    @Published var requestSent = false
+    private var panDebounce: Task<Void, Never>?
+
+    /// The demo corner stands in for a position with no data, and the user hasn't moved the
+    /// map since: derived, so it can't go stale after a pan into coverage.
+    var showingDemoArea: Bool { outsideCity && onFallback && !userMovedMap }
+
+    var coverageDetail: String? {
+        guard let nc = notCovered else { return nil }
+        switch nc.state {
+        case .notBuilt(let nearest?, let km?):
+            return String(format: "Nearest with sun data: %@, %.0f km", nearest, km)
+        case .noServer:
+            return "This phone has no map data here and no bundle server is configured."
+        default:
+            return "We haven't built this area yet."
+        }
+    }
+
+    var canRequestCoverage: Bool { CoverageRequest.url != nil }
+
+    func requestCoverage() {
+        guard let c = destination?.coordinate ?? mapCenter ?? effectiveUserCoordinate else { return }
+        Task { self.requestSent = await CoverageRequest.send(c) }
+    }
+
     /// The map moved: with no walk, paint the sun on everything now on screen.
     func mapRegionChanged(_ region: MKCoordinateRegion) {
         mapCenter = region.center
         let visible = SunArea.box(region)
         visibleBox = visible
         guard destination == nil else { return }
-        if SunArea.needsRecompute(visible: visible, scored: scoredBox) { refreshAmbient() }
+        // A swipe reports several regions; score only where the map settles.
+        panDebounce?.cancel()
+        panDebounce = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let self, !Task.isCancelled, self.destination == nil else { return }
+            if self.notCovered != nil || SunArea.needsRecompute(visible: visible, scored: self.scoredBox) {
+                self.refreshAmbient()
+            }
+        }
     }
 
     func refreshAmbient() {
@@ -95,10 +131,19 @@ final class AppModel: ObservableObject {
                 let field = try await self.sunService.field(in: area.box, at: date)
                 guard !Task.isCancelled, self.destination == nil else { return }
                 self.ambient = field
+                self.notCovered = nil
                 self.scoredBox = area.box
                 self.ambientClipped = area.clipped
                 self.ambientError = nil
                 self.daylight = await self.sunService.daylightWindow(at: center, on: date)
+                self.overlayVersion += 1
+            } catch SunServiceError.notCovered(let state, let sky, let sun, _) {
+                guard !Task.isCancelled, self.destination == nil else { return }
+                self.ambient = nil
+                self.scoredBox = nil
+                self.ambientError = nil
+                self.notCovered = (state, sky, sun)
+                self.requestSent = false
                 self.overlayVersion += 1
             } catch {
                 guard !Task.isCancelled else { return }
@@ -221,6 +266,7 @@ final class AppModel: ObservableObject {
 
     func clearDestination() {
         destination = nil
+        notCovered = nil
         snapshot = nil
         phase = .idle
         overlayVersion += 1
@@ -315,7 +361,19 @@ final class AppModel: ObservableObject {
             if layer == .sun {
                 daylight = await service.daylightWindow(at: user, on: scrubDate)
             }
+            notCovered = nil
             if snap.hasArrived { handleArrival() }
+        } catch CityCatalogError.noCoverage, CityCatalogError.noServer {
+            // Ours-only routing: no tiles, no route. Say so calmly and offer the request.
+            let points = [user] + (destination.map { [$0.coordinate] } ?? [])
+            let box = BBox.around(points.map { ($0.latitude, $0.longitude) }, paddingMeters: 0)
+            let state = await CityCatalog.shared.coverageState(for: box)
+            snapshot = nil
+            phase = .idle
+            notCovered = (state.hasData ? .notBuilt(nearest: nil, km: nil) : state, nil, nil)
+            requestSent = false
+            overlayVersion += 1
+        } catch is CancellationError {
         } catch {
             phase = .failed(error.localizedDescription)
         }
