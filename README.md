@@ -1,5 +1,10 @@
 # Like Water
 
+> **Parked (2026-10-01).** Sun Map moved to its own repo, `MonkeyBonez/SunMap`, at tag
+> `sunmap-split` and is the main line of work. The `SunMap` target here is frozen; the
+> GOES logger and the build-places Action now run there (disabled here). Like Water's
+> route, ETA and corridor work resumes from this repo later.
+
 An iOS walking app that paints the **corridor** — every street you can take to your
 destination without meaningfully losing distance — and colours it with one of three
 layers: **Crossings**, **Interest**, or **Sun**. It never picks a route.
