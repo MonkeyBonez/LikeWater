@@ -96,8 +96,13 @@ public enum RouteEngine {
         return (timeline.effectiveSun(edge: i, slot: k), k)
     }
 
+    /// Only sidewalk time is discounted for light. A crossing (road surface plus the wait
+    /// at the kerb) always costs its full seconds: discounting it let a λ = 1 route in SoMa
+    /// cross the street 15 times in 650 m to stay on the lit side (LEARNINGS §11).
     @inline(__always)
-    static func edgeCost(seconds s: Double, sun: Float, weight w: Double, prefer: RoutePreference) -> Double {
+    static func edgeCost(seconds s: Double, sun: Float, weight w: Double, prefer: RoutePreference,
+                         crossing: Bool) -> Double {
+        if crossing { return s }
         let light = Double(prefer == .sun ? sun : 1 - sun)
         return s * (1 - w * light)
     }
@@ -170,7 +175,7 @@ public enum RouteEngine {
                 if !h.isFinite || nd + h > bound { continue }
                 let s = L.adjForward[k] ? edgeSeconds.forward[i] : edgeSeconds.backward[i]
                 let (sun, _) = sunOn(timeline, edge: i, enteringAt: su, seconds: s)
-                add(v, c + edgeCost(seconds: s, sun: sun, weight: w, prefer: prefer), nd, su + s,
+                add(v, c + edgeCost(seconds: s, sun: sun, weight: w, prefer: prefer, crossing: graph.isCrossing(e)), nd, su + s,
                     id, Int32(i), Int32(k), sun)
             }
         }
@@ -224,7 +229,7 @@ public enum RouteEngine {
             let next = forward ? b : a
             let s = forward ? edgeSeconds.forward[i] : edgeSeconds.backward[i]
             let (sun, k) = sunOn(timeline, edge: i, enteringAt: r.seconds, seconds: s)
-            r.cost += edgeCost(seconds: s, sun: sun, weight: w, prefer: prefer)
+            r.cost += edgeCost(seconds: s, sun: sun, weight: w, prefer: prefer, crossing: graph.isCrossing(Int(e)))
             r.sunSeconds += s * Double(sun)
             r.seconds += s
             r.metres += graph.edgeLen[Int(e)]

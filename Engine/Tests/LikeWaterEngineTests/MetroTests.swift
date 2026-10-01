@@ -171,4 +171,36 @@ final class MetroTests: XCTestCase {
         let w = try walk(l.city, from: p, to: (34.0407, -118.2468))
         XCTAssertGreaterThan(w.distance, 1_000)
     }
+
+    /// PLAN A5: scoring the sun for when the walker reaches each street, not for departure,
+    /// picks a sunnier route through Midtown at 1 pm (measured +11 points; LEARNINGS §11).
+    func testNewYorkTimeAwareRouteFindsMoreSun() throws {
+        let a = (40.7580, -73.9855), b = (40.7359, -73.9911)      // Times Sq → Union Sq
+        let loaded = try stitch("nyc", around: [a, b])
+        let g = loaded.city.graph
+        let o = try XCTUnwrap(g.nearestConnectedNode(lat: a.0, lon: a.1))
+        let d = try XCTUnwrap(g.nearestNode(lat: b.0, lon: b.1, inComponent: g.component[Int(o)]))
+        let labels = try CorridorEngine.labels(graph: g, destination: d, origin: o, slack: 0.5)
+        let c = try CorridorEngine.corridor(graph: g, labels: labels, origin: o, slack: 0.1)
+        let secs = PaceModel().edgeSeconds(graph: g, edges: c.edges, terrain: loaded.city.buildings.terrain)
+        var scorer = SunScorer(buildings: loaded.city.buildings)
+        let f = ISO8601DateFormatter()
+        let tl = SunTimelineBuilder.build(graph: g, corridor: c, origin: g.coordinate(o), destination: g.coordinate(d),
+                                          departure: f.date(from: "2026-09-23T17:00:00Z")!, pace: .normal,
+                                          edgeSeconds: secs, scorer: &scorer, cache: SunSlotCache(), sky: nil)
+        let aware = try RouteEngine.route(graph: g, corridor: c, labels: labels, origin: o, timeline: tl,
+                                          edgeSeconds: secs, sunWeight: 1)
+        let naive = try RouteEngine.route(graph: g, corridor: c, labels: labels, origin: o, timeline: tl.departureOnly(),
+                                          edgeSeconds: secs, sunWeight: 1)
+        // Light both by when the walker actually gets there.
+        let truth = RouteEngine.evaluate(edges: naive.edges, from: o, graph: g, corridor: c, timeline: tl,
+                                         edgeSeconds: secs, sunWeight: 1)!
+        print(String(format: "NYC 1 pm: time-aware %.0f%% sun in %.1f min, departure-only %.0f%% (timeline %.0f ms, route %.1f ms)",
+                     aware.sunFraction * 100, aware.seconds / 60, truth.sunFraction * 100, tl.computeMs, aware.computeMs))
+        XCTAssertNotEqual(aware.edges, naive.edges)
+        XCTAssertGreaterThanOrEqual(aware.sunFraction - truth.sunFraction, 0.05)
+        XCTAssertLessThanOrEqual(aware.metres, c.distance * 1.1 + 1e-6)
+        XCTAssertLessThan(tl.computeMs, 150 * Self.slow)
+        XCTAssertLessThan(aware.computeMs, 40 * Self.slow)
+    }
 }

@@ -139,7 +139,7 @@ final class RouteTests: XCTestCase {
 
     func testASunnyDetourIsTakenOnlyInsideTheSlack() throws {
         let cols = 5
-        let g = gridGraph(rows: 2, cols: cols)              // row 0 shaded, row 1 sunny
+        let g = gridGraph(rows: 2, cols: cols, crossings: false)   // row 0 shaded, row 1 sunny
         for (slack, takesDetour) in [(0.5, true), (0.4, false)] {
             let (labels, c, secs) = try setup(g, from: 0, to: 4, slack: slack)
             let tl = SunTimeline(constant: rowSun(g, c, cols: cols, row: 1), departure: t0, slots: 4)
@@ -211,6 +211,18 @@ final class RouteTests: XCTestCase {
                                        edgeSeconds: secs, sunWeight: 1)
         XCTAssertTrue(r0.nodes.contains(2))
         XCTAssertFalse(r0.nodes.contains(Int32(cols + 2)))
+    }
+
+    func testCrossingTimeIsNeverDiscountedForSun() throws {
+        // Same detour, but every other row-1 segment is a crosswalk: sun on the road surface
+        // and the kerb wait must not buy the detour (the SoMa zig-zag, LEARNINGS §11).
+        let cols = 5
+        let g = gridGraph(rows: 2, cols: cols)
+        let (labels, c, secs) = try setup(g, from: 0, to: 4, slack: 0.5)
+        let tl = SunTimeline(constant: rowSun(g, c, cols: cols, row: 1), departure: t0, slots: 4)
+        let r = try RouteEngine.route(graph: g, corridor: c, labels: labels, origin: 0, timeline: tl,
+                                      edgeSeconds: secs, sunWeight: 1)
+        XCTAssertFalse(r.nodes.contains(Int32(cols + 2)))
     }
 
     func testHysteresisKeepsANearlyAsGoodRoute() {

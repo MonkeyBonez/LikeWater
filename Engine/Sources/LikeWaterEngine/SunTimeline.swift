@@ -142,6 +142,14 @@ public struct SunTimeline: Sendable {
     public func effectiveSun(edge: Int, slot: Int) -> Float {
         guard slotCount > 0 else { return 0 }
         let k = min(max(slot, 0), slotCount - 1)
+        return geometricSun(edge: edge, slot: k) * beam[k]
+    }
+
+    /// Sun on the edge from building and terrain shadows alone (no cloud): what the map's
+    /// colour bands show, faded separately by `beam`.
+    public func geometricSun(edge: Int, slot: Int) -> Float {
+        guard slotCount > 0 else { return 0 }
+        let k = min(max(slot, 0), slotCount - 1)
         guard sunUp[k] else { return 0 }
         var s = sun[k][edge]
         if s.isNaN {
@@ -151,7 +159,7 @@ public struct SunTimeline: Sendable {
                 if k + d < slotCount, !sun[k + d][edge].isNaN { s = sun[k + d][edge]; break }
             }
         }
-        return s * beam[k]
+        return s
     }
 
     /// Departure-only baseline: every slot replaced by the departure slot's scores and

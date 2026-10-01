@@ -304,6 +304,150 @@ case "coverage":
                  label as NSString, sidewalkM / 1000, sidewalkN, 100 * syntheticM / max(sidewalkM, 1),
                  streetM / 1000, streetN, 100 * kerbShare))
 
+case "route":
+    // A route inside the corridor (PLAN.md §1.3, §1.5):
+    //   lwtool route --metro ../Server/nyc --from LAT,LON --to LAT,LON [--slack 0.1]
+    //     [--at ISO8601] [--pace relaxed|normal|brisk|M/S] [--sun-weight 0…1]
+    //     [--prefer sun|shade] [--ladder] [--departure-only] [--compare] [--walk] --out f.geojson
+    // --departure-only scores every slot at the departure instant (the baseline);
+    // --compare runs both and says whether time of arrival changed the route;
+    // --walk follows the chosen route in 50 m steps and counts route changes with and
+    // without hysteresis.
+    let from = coordinate(option("from"), "from")
+    let to = coordinate(option("to"), "to")
+    let slack = Double(option("slack") ?? "0.1") ?? 0.1
+    let weight = Double(option("sun-weight") ?? "1") ?? 1
+    let prefer = RoutePreference(rawValue: option("prefer") ?? "sun") ?? .sun
+    let pace: WalkingPace = {
+        switch option("pace") ?? "normal" {
+        case "relaxed": return .relaxed
+        case "brisk": return .brisk
+        case "normal": return .normal
+        case let v: return WalkingPace(metresPerSecond: Double(v) ?? 1.4)
+        }
+    }()
+    let iso = ISO8601DateFormatter()
+    let departure = option("at").flatMap { iso.date(from: $0) } ?? Date()
+    guard let origin = graph.nearestConnectedNode(lat: from.lat, lon: from.lon) else { fail("origin off graph") }
+    guard let dest = graph.nearestNode(lat: to.lat, lon: to.lon, inComponent: graph.component[Int(origin)]) else {
+        fail("destination off graph")
+    }
+    let labels = try CorridorEngine.labels(graph: graph, destination: dest, origin: origin,
+                                           slack: max(slack, 0.35) + 0.15)
+    let corridor = try CorridorEngine.corridor(graph: graph, labels: labels, origin: origin, slack: slack)
+    let tp = CFAbsoluteTimeGetCurrent()
+    let secs = PaceModel(pace: pace).edgeSeconds(graph: graph, edges: corridor.edges, terrain: city.buildings.terrain)
+    let paceMs = (CFAbsoluteTimeGetCurrent() - tp) * 1000
+    city.buildings.useTerrain = !CommandLine.arguments.contains("--no-terrain")
+    var scorer = SunScorer(buildings: city.buildings, maxBuildingHeight: maxHeightOption)
+    let o = graph.coordinate(origin), d = graph.coordinate(dest)
+    let timeAware = SunTimelineBuilder.build(graph: graph, corridor: corridor, origin: o, destination: d,
+                                             departure: departure, pace: pace, edgeSeconds: secs,
+                                             scorer: &scorer, cache: SunSlotCache(), sky: nil)
+    let baseline = timeAware.departureOnly()
+    let timeline = CommandLine.arguments.contains("--departure-only") ? baseline : timeAware
+    func describe(_ r: Route) -> String {
+        String(format: "%5.1f min · %4.0f m · %3.0f%% sun · %2d crossings", r.seconds / 60, r.metres,
+               r.sunFraction * 100, r.edges.filter { graph.isCrossing(Int($0)) }.count)
+    }
+    func run(_ t: SunTimeline, _ w: Double) throws -> Route {
+        try RouteEngine.route(graph: graph, corridor: corridor, labels: labels, origin: origin, timeline: t,
+                              edgeSeconds: secs, sunWeight: w, prefer: prefer)
+    }
+    let fastest = try run(timeline, 0)
+    let chosen = try run(timeline, weight)
+    let sunniest = try run(timeline, 1)
+    // Ground truth for every route: lit by the time-aware timeline whatever chose it.
+    func truth(_ r: Route) -> Route {
+        RouteEngine.evaluate(edges: r.edges, from: origin, graph: graph, corridor: corridor, timeline: timeAware,
+                             edgeSeconds: secs, sunWeight: r.sunWeight, prefer: prefer) ?? r
+    }
+    print(String(format: "corridor %.0f m, slack %.2f: %d edges · labels %.0f ms · corridor %.1f ms · pace %.1f ms",
+                 corridor.distance, slack, corridor.edges.count, labels.computeMs, corridor.computeMs, paceMs))
+    let pairs = corridor.edges.count * timeAware.slotCount
+    print(String(format: "timeline: %d slots from %@, scored %d of %d edge×slot pairs (%.0f%%) in %.1f ms%@",
+                 timeAware.slotCount, iso.string(from: timeAware.slotStart(0)), timeAware.scoredPairs, pairs,
+                 100 * Double(timeAware.scoredPairs) / Double(max(pairs, 1)), timeAware.computeMs,
+                 timeAware.sunset.map { " · sunset " + iso.string(from: $0) } ?? ""))
+    print("fastest  " + describe(truth(fastest)))
+    print(String(format: "chosen   %@  (λ %.2f, %@; +%.1f min vs fastest) · %.2f ms, %d labels expanded, max %d at a node, %d cap hits",
+                 describe(truth(chosen)), weight, prefer.rawValue, (chosen.seconds - fastest.seconds) / 60,
+                 chosen.computeMs, chosen.labelsExpanded, chosen.maxLabelsAtANode, chosen.capHits))
+    print("sunniest " + describe(truth(sunniest)))
+    var features = [Feature]()
+    func lineFeature(_ r: Route, _ name: String) -> Feature {
+        Feature(coords: r.nodes.map { graph.coordinate($0) },
+                properties: ["name": name, "sunWeight": r.sunWeight, "seconds": r.seconds,
+                             "metres": r.metres, "sunFraction": truth(r).sunFraction])
+    }
+    features.append(lineFeature(fastest, "fastest"))
+    features.append(lineFeature(chosen, "chosen"))
+    features.append(lineFeature(sunniest, "sunniest"))
+    if CommandLine.arguments.contains("--compare") {
+        let a = try run(timeAware, weight), b = try run(baseline, weight)
+        let ta = truth(a), tb = truth(b)
+        print(String(format: "time-aware vs departure-only at λ %.2f: %@ · sun %.0f%% vs %.0f%% (gap %+.0f points) · %.1f vs %.1f min",
+                     weight, a.edges == b.edges ? "same route" : "DIFFERENT route",
+                     ta.sunFraction * 100, tb.sunFraction * 100, (ta.sunFraction - tb.sunFraction) * 100,
+                     ta.seconds / 60, tb.seconds / 60))
+        features.append(lineFeature(b, "departure-only"))
+    }
+    if CommandLine.arguments.contains("--ladder") {
+        let ladder = RouteEngine.ladder(graph: graph, corridor: corridor, labels: labels, origin: origin,
+                                        timeline: timeline, edgeSeconds: secs, prefer: prefer)
+        print("ladder: \(ladder.count) Pareto routes over 11 λ values")
+        for (k, r) in ladder.enumerated() {
+            let t = truth(r)
+            print(String(format: "  %d. λ %.1f  %@", k + 1, r.sunWeight, describe(t)))
+        }
+        if ladder.count >= 2, let f = ladder.first.map(truth), let l = ladder.last.map(truth),
+           l.sunFraction > f.sunFraction {
+            print(String(format: "  price of sun: %.2f min per +10%% sun",
+                         (l.seconds - f.seconds) / 60 / ((l.sunFraction - f.sunFraction) * 10)))
+        }
+    }
+    if CommandLine.arguments.contains("--walk") {
+        // Simulated walk along the chosen route, re-routing every 50 m like the app does on
+        // GPS fixes; counts route changes with tolerance 0 and 0.05.
+        for tolerance in [0.0, 0.05] {
+            var current = chosen
+            var walked = 0.0, changes = 0, fixes = 0
+            var at = 0
+            let total = chosen.metres
+            while at < current.nodes.count - 1 {
+                var step = 0.0
+                while at < current.nodes.count - 1 && step < 50 {
+                    step += graph.edgeLen[Int(current.edges[at])]; at += 1
+                }
+                walked += step; fixes += 1
+                let here = current.nodes[at]
+                guard here != dest else { break }
+                let elapsed = current.arrivalSeconds[at]
+                guard let c2 = try? CorridorEngine.corridor(graph: graph, labels: labels, origin: here, slack: slack) else { break }
+                let s2 = PaceModel(pace: pace).edgeSeconds(graph: graph, edges: c2.edges, terrain: city.buildings.terrain)
+                let t2 = SunTimelineBuilder.build(graph: graph, corridor: c2, origin: graph.coordinate(here), destination: d,
+                                                  departure: departure.addingTimeInterval(elapsed), pace: pace,
+                                                  edgeSeconds: s2, scorer: &scorer, cache: SunSlotCache(), sky: nil)
+                guard let fresh = try? RouteEngine.route(graph: graph, corridor: c2, labels: labels, origin: here,
+                                                         timeline: t2, edgeSeconds: s2, sunWeight: weight, prefer: prefer) else { break }
+                let rest = Array(current.edges[at...])
+                let kept = RouteEngine.evaluate(edges: rest, from: here, graph: graph, corridor: c2, timeline: t2,
+                                                edgeSeconds: s2, sunWeight: weight, prefer: prefer)
+                if let kept, kept.edges == fresh.edges || RouteEngine.shouldKeep(previous: kept, candidate: fresh, tolerance: tolerance) {
+                    current = kept
+                } else {
+                    changes += 1; current = fresh
+                }
+                at = 0
+                _ = total
+            }
+            print(String(format: "walk (tolerance %.2f): %d fixes over %.0f m, %d route changes (%.1f per km)",
+                         tolerance, fixes, walked, changes, Double(changes) / max(walked / 1000, 0.001)))
+        }
+    }
+    writeGeoJSON(features, meta: ["slack": slack, "sunWeight": weight, "departure": iso.string(from: departure),
+                                  "scoredPairs": timeAware.scoredPairs, "timelineMs": timeAware.computeMs], to: out)
+
 default:
-    fail("usage: lwtool corridor|sun|sunbias|coverage|sky [options]")
+    fail("usage: lwtool corridor|route|sun|sunbias|coverage|sky [options]")
 }

@@ -2,7 +2,7 @@ import Foundation
 @testable import LikeWaterEngine
 
 /// Builds a rows x cols lattice with exact 100 m edges so corridor sets are exactly predictable.
-func gridGraph(rows: Int, cols: Int, spacing: Double = 100) -> PedestrianGraph {
+func gridGraph(rows: Int, cols: Int, spacing: Double = 100, crossings: Bool = true) -> PedestrianGraph {
     var lat: [Double] = [], lon: [Double] = []
     for i in 0..<rows {
         for j in 0..<cols {
@@ -15,7 +15,7 @@ func gridGraph(rows: Int, cols: Int, spacing: Double = 100) -> PedestrianGraph {
     for i in 0..<rows {
         for j in 0..<cols {
             if j + 1 < cols {
-                a.append(idx(i, j)); b.append(idx(i, j + 1)); len.append(spacing); crossing.append(j % 2 == 0)
+                a.append(idx(i, j)); b.append(idx(i, j + 1)); len.append(spacing); crossing.append(crossings && j % 2 == 0)
             }
             if i + 1 < rows {
                 a.append(idx(i, j)); b.append(idx(i + 1, j)); len.append(spacing); crossing.append(false)
