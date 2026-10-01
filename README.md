@@ -167,8 +167,11 @@ cd Pipeline
 .venv/bin/python goes_report.py               # after ≥ 10 days: agreement, who's right, decision
 ```
 
-`Pipeline/launchd/com.likewater.goes-log.plist` runs the logger every 15 min (installed on
-the owner's Mac; it only logs while the Mac is awake). Logs: `Pipeline/cache/goes_log/`.
+The logger runs hourly in GitHub Actions (`.github/workflows/goes-log.yml`, SF daytime,
+four scans per run) and appends to the `goes-log` branch, whose `REPORT.md` is the running
+verdict — no laptop needed. `Pipeline/launchd/com.likewater.goes-log.plist` is the same
+logger every 15 min on a Mac (optional; the report merges both: `goes_report.py --log-dir
+cache/goes_log --log-dir ../goes-log-checkout/goes_log`).
 
 ## The bundle
 

@@ -8,8 +8,14 @@ the San Francisco box (plus the cells holding SFO and OAK):
 and once per run the latest METAR sky cover at KSFO and KOAK (api.weather.gov, free) as
 ground truth. goes_report.py scores the log.
 
-    .venv/bin/python goes_log.py            # one run (launchd calls this every 15 min)
-    .venv/bin/python goes_log.py --dry-run  # print the row instead of appending it
+    .venv/bin/python goes_log.py                   # the latest scan (launchd calls this every 15 min)
+    .venv/bin/python goes_log.py --since-hours 1   # every quarter-hour scan of the past hour (GitHub Actions, hourly)
+    .venv/bin/python goes_log.py --dry-run         # print the rows instead of appending them
+    .venv/bin/python goes_log.py --log-dir DIR     # where the daily .jsonl files go (default cache/goes_log)
+
+NOAA keeps every scan on the bucket, so logging an hour late loses nothing: the row's
+`latency_s` is upload time minus scan end, independent of when we fetched it. A scan
+already in the day's file is skipped, so overlapping runs never double-log.
 
 Open-Meteo is fetched at most once an hour (its HRRR-based forecast updates hourly) and
 cached, so the logger costs ~35 locations × 24 = ~850 of the free tier's 10,000 daily calls.
@@ -21,7 +27,7 @@ import json
 import math
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -113,6 +119,38 @@ def metar(station: str) -> dict | None:
             "raw": p.get("rawMessage")}
 
 
+def metar_history(station: str, start: datetime, end: datetime) -> list[dict]:
+    """Every observation of a station in a window, newest first (api.weather.gov)."""
+    try:
+        r = requests.get(f"https://api.weather.gov/stations/{station}/observations",
+                         params={"start": start.isoformat(timespec="seconds"),
+                                 "end": end.isoformat(timespec="seconds"), "limit": 100},
+                         headers={"User-Agent": USER_AGENT, "Accept": "application/geo+json"}, timeout=30)
+        r.raise_for_status()
+        out = []
+        for f in r.json().get("features", []):
+            p = f["properties"]
+            out.append({"time": p.get("timestamp"),
+                        "layers": [{"amount": l.get("amount"), "base_m": (l.get("base") or {}).get("value")}
+                                   for l in p.get("cloudLayers") or []],
+                        "visibility_m": (p.get("visibility") or {}).get("value"), "raw": p.get("rawMessage")})
+        return out
+    except Exception as e:
+        return [{"error": str(e)[:200]}]
+
+
+def nearest_metar(history: list[dict], t: datetime, max_minutes: float = 45) -> dict | None:
+    """The observation closest to `t`, if one is within `max_minutes`."""
+    best, best_dt = None, None
+    for m in history:
+        if "time" not in m or not m["time"]:
+            continue
+        dt = abs((datetime.fromisoformat(m["time"].replace("Z", "+00:00")) - t).total_seconds()) / 60
+        if dt <= max_minutes and (best_dt is None or dt < best_dt):
+            best, best_dt = m, dt
+    return best
+
+
 def metar_sunny(m: dict | None) -> bool | None:
     """Ground truth for "is there direct sun": no broken/overcast layer, no obscured sky."""
     if not m or "layers" not in m:
@@ -123,20 +161,41 @@ def metar_sunny(m: dict | None) -> bool | None:
     return not (amounts & {"BKN", "OVC", "VV"})
 
 
-def run(dry_run: bool = False) -> dict:
-    cells = log_cells()
-    obs_keys = g.find_scan()
+def quarter_hours(since_hours: float, now: datetime) -> list[datetime]:
+    """Every quarter-hour mark in (now − since_hours, now − 15 min]: scans we can fetch complete."""
+    first = now - timedelta(hours=since_hours)
+    t = first.replace(minute=(first.minute // 15) * 15, second=0, microsecond=0)
+    out = []
+    while t <= now - timedelta(minutes=15):
+        if t > first:
+            out.append(t)
+        t += timedelta(minutes=15)
+    return out
+
+
+def logged_scan_ends(log_dir: Path, day: str) -> set[str]:
+    path = log_dir / f"{day}.jsonl"
+    if not path.exists():
+        return set()
+    out = set()
+    for line in path.read_text().splitlines():
+        try:
+            out.add(json.loads(line)["scan_end"])
+        except Exception:
+            continue
+    return out
+
+
+def observe(cells, at: datetime | None, om: list[dict], om_err: str | None,
+            metars: dict[str, list[dict]] | None) -> dict:
+    """One scan (the latest, or the one nearest `at`) classified for every cell, with the
+    forecast and METAR for the same time."""
+    obs_keys = g.find_scan(at)
     scan = g.load_scan(obs_keys, (SF_BOX[0] - 0.12, STATIONS["KSFO"][1] - 0.2, SF_BOX[2], STATIONS["KOAK"][1] + 0.05))
     end = g.scan_end(obs_keys["acm"][0])
     elevation = g.sun_elevation(37.76, -122.44, end)
     goes = g.classify(scan, cells, elevation)
     uploaded = max(datetime.fromisoformat(m.replace("Z", "+00:00")) for _, m in obs_keys.values())
-    now = time.time()
-    try:
-        om = open_meteo(cells, now)
-        om_err = None
-    except Exception as e:
-        om, om_err = [], str(e)[:200]
     rows = []
     for i, c in enumerate(goes):
         row = {"lat": c.lat, "lon": c.lon,
@@ -145,29 +204,63 @@ def run(dry_run: bool = False) -> dict:
         if i < len(om):
             row["om"] = om_at(om[i], end.timestamp(), elevation)
         rows.append(row)
-    record = {
+    if metars is None:
+        metar_rows = {s: metar(s) for s in STATIONS}
+    else:
+        metar_rows = {s: nearest_metar(metars[s], end) for s in STATIONS}
+    return {
         "logged": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "scan_end": end.isoformat(), "available": uploaded.isoformat(),
         "latency_s": round((uploaded - end).total_seconds()),
         "sun_elevation": round(elevation, 2), "om_error": om_err,
-        "metar": {s: metar(s) for s in STATIONS},
+        "metar": metar_rows,
         "stations": {s: list(next(c for c in cells if abs(c[0] - p[0]) < 0.0113 and abs(c[1] - p[1]) < 0.015))
                      for s, p in STATIONS.items()},
         "cells": rows,
     }
-    if dry_run:
-        print(json.dumps(record, indent=1)[:3000])
-        return record
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(LOG_DIR / f"{end:%Y-%m-%d}.jsonl", "a") as f:
-        f.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def run(dry_run: bool = False, since_hours: float | None = None, log_dir: Path = LOG_DIR) -> list[dict]:
+    cells = log_cells()
+    now = datetime.now(timezone.utc)
+    try:
+        om = open_meteo(cells, time.time())
+        om_err = None
+    except Exception as e:
+        om, om_err = [], str(e)[:200]
+    if since_hours:
+        times = quarter_hours(since_hours, now)
+        metars = {s: metar_history(s, now - timedelta(hours=since_hours + 1), now) for s in STATIONS}
+    else:
+        times, metars = [None], None
+    records = []
+    for t in times:
+        try:
+            record = observe(cells, t, om, om_err, metars)
+        except Exception as e:
+            print(f"{t}: no scan ({str(e)[:120]})")
+            continue
+        day = record["scan_end"][:10]
+        if not dry_run and record["scan_end"] in logged_scan_ends(log_dir, day):
+            print(f"{record['scan_end']} already logged")
+            continue
+        records.append(record)
+        if dry_run:
+            print(json.dumps(record, indent=1)[:1500])
+            continue
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / f"{day}.jsonl", "a") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        print(f"{record['scan_end'][:16]}Z latency {record['latency_s']} s, {len(record['cells'])} cells, "
+              f"SFO {metar_sunny(record['metar']['KSFO'])}, OM {'ok' if not om_err else om_err}")
     g.prune_cache(keep_hours=1)
-    print(f"{end:%Y-%m-%d %H:%M}Z latency {record['latency_s']} s, {len(rows)} cells, "
-          f"SFO {metar_sunny(record['metar']['KSFO'])}, OM {'ok' if not om_err else om_err}")
-    return record
+    return records
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true")
-    run(ap.parse_args().dry_run)
+    ap.add_argument("--since-hours", type=float, help="log every quarter-hour scan of the past N hours")
+    ap.add_argument("--log-dir", type=Path, default=LOG_DIR)
+    a = ap.parse_args()
+    run(a.dry_run, a.since_hours, a.log_dir)

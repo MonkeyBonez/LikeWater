@@ -1,6 +1,9 @@
 """Scores the GOES fog POC log (PLAN.md §2 E) and applies the decision rule.
 
-    .venv/bin/python goes_report.py [--days 14] [--min-days 10]
+    .venv/bin/python goes_report.py [--days 14] [--min-days 10] [--log-dir DIR ...] [--markdown REPORT.md]
+
+Several --log-dir values (the Mac's cache/goes_log and the goes-log branch) are merged;
+a scan logged in both counts once.
 
 Daytime only (09:00–17:00 Pacific). Each source says "sun" when its beam ≥ 0.5:
   agreement      share of cell-times where GOES and Open-Meteo say the same thing
@@ -17,7 +20,7 @@ import argparse
 import json
 import statistics
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,11 +29,19 @@ from goes_log import LOG_DIR, metar_sunny
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
-def load(days: int, log_dir: Path = LOG_DIR) -> list[dict]:
-    rows = []
-    for p in sorted(log_dir.glob("*.jsonl"))[-days - 1:]:
-        rows += [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
-    return rows
+def load(days: int, log_dirs: list[Path] | None = None) -> list[dict]:
+    rows, seen = [], set()
+    for log_dir in log_dirs or [LOG_DIR]:
+        for p in sorted(log_dir.glob("*.jsonl"))[-days - 1:]:
+            for line in p.read_text().splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if r["scan_end"] in seen:
+                    continue
+                seen.add(r["scan_end"])
+                rows.append(r)
+    return sorted(rows, key=lambda r: r["scan_end"])
 
 
 def sunny(beam) -> bool | None:
@@ -92,11 +103,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--min-days", type=int, default=10)
+    ap.add_argument("--log-dir", type=Path, action="append")
+    ap.add_argument("--markdown", type=Path, help="also write the report as Markdown")
     a = ap.parse_args(argv)
-    s = score(load(a.days))
+    s = score(load(a.days, a.log_dir))
     print(json.dumps(s, indent=1, default=str))
-    if s["days"] < a.min_days:
-        print(f"only {s['days']} daytime days logged; the decision needs ≥ {a.min_days}")
+    note = f"only {s['days']} daytime days logged; the decision needs ≥ {a.min_days}" if s["days"] < a.min_days else ""
+    if note:
+        print(note)
+    if a.markdown:
+        rows = "\n".join(f"| {k} | {json.dumps(v, default=str)} |" for k, v in s.items())
+        a.markdown.write_text(
+            "# GOES fog POC — running report\n\n"
+            f"Updated {datetime.now(timezone.utc).isoformat(timespec='minutes')}. Daytime (9 am–5 pm Pacific) scans only.\n\n"
+            f"| metric | value |\n|---|---|\n{rows}\n\n{note}\n\n"
+            "Decision rule: build the GOES job if GOES is right in ≥ 70 % of its disagreements with the "
+            "forecast at SFO/OAK and the median latency is ≤ 15 min (PLAN.md §2 E).\n")
 
 
 if __name__ == "__main__":

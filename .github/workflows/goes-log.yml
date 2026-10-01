@@ -1,0 +1,53 @@
+# GOES fog proof-of-concept logger (PLAN.md §2 E), moved off the owner's Mac so the two
+# weeks of data don't depend on a laptop being awake. Hourly during San Francisco daytime
+# (15:00–01:00 UTC covers 8 am–6 pm in both PDT and PST); each run logs the four 15-minute
+# scans of the past hour (NOAA keeps every scan, so nothing is lost by fetching late) and
+# appends them to the `goes-log` branch, then rewrites REPORT.md there with the running
+# verdict. ~1.5 min per run, ~500 free minutes a month.
+name: goes-log
+
+on:
+  schedule:
+    - cron: "23 15-23,0-1 * * *"   # an odd minute: top-of-the-hour schedules queue for a long time
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: goes-log
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - uses: actions/checkout@v4
+        with:
+          ref: goes-log
+          path: log
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: repo/Pipeline/requirements-goes.txt
+      - name: Install
+        run: pip install -q -r repo/Pipeline/requirements-goes.txt
+      - name: Log the past hour's scans
+        working-directory: repo/Pipeline
+        run: python goes_log.py --since-hours 1.5 --log-dir ../../log/goes_log
+      - name: Running report
+        working-directory: repo/Pipeline
+        run: python goes_report.py --log-dir ../../log/goes_log --markdown ../../log/REPORT.md | tail -3
+      - name: Commit
+        working-directory: log
+        run: |
+          git config user.name "likewater-goes"
+          git config user.email "likewater-goes@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -q -m "goes: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
