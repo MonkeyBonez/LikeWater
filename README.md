@@ -84,6 +84,22 @@ version 2 plus a per-node global id. A phone without a server can be given a met
 directly: copy `Server/<id>/` into the app's `Library/Application Support/Cities/<id>/`
 (`xcrun devicectl device copy to --domain-type appDataContainer …`).
 
+## Satellite fog (proof of concept)
+
+The sky layer is a forecast (HRRR via Open-Meteo). Whether observing the fog from GOES-West
+beats it is being measured before anything is built (PLAN.md §2 E, LEARNINGS §9.6):
+
+```sh
+cd Pipeline
+.venv/bin/pip install xarray netCDF4 pyyaml   # once
+.venv/bin/python goes_poc.py                  # latest scan → per-cell clear/low/mid_high + beam
+.venv/bin/python goes_log.py                  # one log row (GOES + Open-Meteo + SFO/OAK METAR)
+.venv/bin/python goes_report.py               # after ≥ 10 days: agreement, who's right, decision
+```
+
+`Pipeline/launchd/com.likewater.goes-log.plist` runs the logger every 15 min (installed on
+the owner's Mac; it only logs while the Mac is awake). Logs: `Pipeline/cache/goes_log/`.
+
 ## The bundle
 
 `Pipeline/build_bundle.py` takes a place name — nothing in it is specific to one city —

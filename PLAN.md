@@ -23,7 +23,7 @@ and `LEARNINGS.md` (what we have measured) first. Line numbers below are as of
 - **Free hosting without buying a domain** (Cloudflare Pages, `*.pages.dev`); publishing
   is an outward-facing step the owner performs (`wrangler login`); the scripts are written
   here, nothing is uploaded by an agent.
-- Repo etiquette: commit/push only when asked; update `LEARNINGS.md` and `BACKLOG.md` in
+- Repo etiquette: the repo is private `MonkeyBonez/LikeWater` on GitHub; commit and push to `main` after each tested step; update `LEARNINGS.md` and `BACKLOG.md` in
   the same turn as the code (per `CLAUDE.md`); measure with `lwtool`, don't eyeball.
 
 ---

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- GOES fog POC logger, every 15 min (PLAN.md §2 E). Install:
+       cp Pipeline/launchd/com.likewater.goes-log.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.likewater.goes-log.plist
+     Remove:
+       launchctl bootout gui/$(id -u)/com.likewater.goes-log
+       rm ~/Library/LaunchAgents/com.likewater.goes-log.plist
+     Paths are absolute to this checkout; edit them if the repo moves. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.likewater.goes-log</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/.venv/bin/python</string>
+    <string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/goes_log.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline</string>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/cache/goes_log/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline/cache/goes_log/launchd.log</string>
+</dict>
+</plist>

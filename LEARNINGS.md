@@ -341,6 +341,30 @@ the app was before weather existed.
 
 ---
 
+### 9.6 GOES fog POC: first findings (2026-09-30)
+Built `Pipeline/goes_poc.py` (classify each 0.0225° lattice cell from GOES-18 ACM cloud
+mask, ACHA cloud-top height, ACTP phase and COD optical depth), `goes_log.py` (every 15
+min: GOES + Open-Meteo for the same cells + SFO/OAK METAR) and `goes_report.py` (decision
+rule). What the first day showed, before any verdict:
+- **The data is small and fast.** One CONUS scan of the four products is 9.5 MB (ACM 3.4,
+  COD 5.3, phase 0.5, height 0.3), on the bucket **2–3 min** after the scan ends (129 s and
+  165 s measured; COD is the slowest). Cropping + classifying 600 Bay Area cells: ~5 s on
+  the Mac including downloads. Latency is not going to decide this.
+- **Cloud-top height reads high for the marine layer**: ACHA put the fog tops at
+  1.0–1.9 km on mornings METAR had stratus at a few hundred metres. A 1.2 km "low cloud"
+  cutoff misclassified most fog as mid/high; the cutoff is now **2 km with a liquid
+  phase**, which is also what Open-Meteo means by `cloud_cover_low`, so the two compare
+  like for like.
+- **Fog is optically thick, remnants aren't.** Ocean Beach at 8 am on 2026-09-16 had COD
+  51 (beam 0); the 10 am leftovers on 2026-09-30 had COD 0.6–2.5, which still lets
+  ~20–50 % of the beam through. Beam is therefore `exp(−COD · air mass)` whenever COD
+  exists (daytime), not a flat zero for "low".
+- **The fog line is visible at cell scale**: 2026-09-16 15:00Z classifies Ocean Beach as
+  liquid low cloud and the Mission as clear (`tests/test_goes.py` pins it on the cropped
+  scan); 30 min later the fog had reached the Mission.
+The verdict (GOES vs HRRR on disagreements against METAR, burn-off timing) comes after
+≥ 10 days of logs: `Pipeline/.venv/bin/python Pipeline/goes_report.py`.
+
 ## 10. Scaling to New York, Los Angeles and Seattle
 
 Everything up to here was one city per bundle, fetched from Overpass. Neither half of that
