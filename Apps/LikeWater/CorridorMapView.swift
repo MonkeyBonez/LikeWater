@@ -309,9 +309,9 @@ struct CorridorMapView: UIViewRepresentable {
             }
             guard let band = overlay as? CorridorBand else { return MKOverlayRenderer(overlay: overlay) }
             let renderer = MKMultiPolylineRenderer(multiPolyline: band)
-            var color = palette[band.band].0
-            // With a route on top, the corridor steps back to context.
-            if model.snapshot?.route != nil { color = color.withAlphaComponent(color.cgColor.alpha * 0.6) }
+            // Full colour even with a route on top: dimming it read as "washed out" outdoors
+            // (2026-10-01 walk); the route stands out by its width and white casing.
+            let color = palette[band.band].0
             renderer.strokeColor = layer == .sun ? SkyPalette.fade(color, beam: Double(band.beam)) : color
             renderer.lineWidth = palette[band.band].1
             renderer.lineCap = .round

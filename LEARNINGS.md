@@ -553,6 +553,16 @@ line shows "last walk: predicted · actual" after a GPS walk, and `PaceEstimator
 measured pace 50/50 after 300 m / 3 min and learns across walks. Accuracy goes here once
 the owner has walked a few (PLAN Part 3 #9).
 
+### 11.6 Dimming the corridor under the route read as "washed out" outdoors
+
+The route was drawn on top of a corridor faded to 60 % opacity, so it would stand out.
+On the first real walk with it (2026-10-01, a clear morning: the forecast gave 0.7–1.0 of
+full sun after 7:45) the owner's report was "the walking path with the sun was dulled
+out". The sky fade wasn't the cause; the 0.6 alpha was. On a phone in daylight, a
+translucent sun palette over the light map reads as no sun. The corridor is full colour
+again; the route stands out by its width (9 pt) and white casing alone. Lesson: on this
+map, translucency means "cloud", so don't use it for "less important".
+
 ## 12. Loading anywhere: coverage, builds, eviction (2026-09-30)
 
 - **Coverage by the first point was the bug behind "half a screen fails".** Both apps
