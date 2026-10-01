@@ -104,3 +104,28 @@ via points, tunable costing. The backend to use if we ever route where we have n
 
 GPS is ±20–50 m downtown; an on-phone HMM over our graph would say which sidewalk the
 walker is on. Not needed for the corridor; would sharpen "you're on the sunny side".
+
+## Sun by block: sky per cell, shadows across tile borders
+
+The zoomed-out field reads the beam once at the screen centre (9 forecast cells ≈ 7 km),
+so a 40 km Bay view fades uniformly even when the fog line is inside it; and each metro
+tile is scored from its own buildings only (LEARNINGS §13: 1.5 % of 70 m blocks change
+band at the border). **What:** sample the forecast field per cell (needs a wider lattice
+fetch — more Open-Meteo calls; the owner's rate-limit lever), and give the tile-alone
+scorer a 300 m strip of the neighbours' buildings. **Trigger:** a visible fog line or seam
+in the block view on a real walk. **Effort:** ½ day each.
+
+## Route search cost per GPS fix
+
+`makeRoute` runs three Pareto searches per fix (λ, 0 and 1 for the slider captions), each
+rebuilding the corridor's local index. Measured 25 ms per search in Midtown at slack 0.3
+on the Mac; ~3× on a phone. **What:** build the local index once per fix and reuse it;
+recompute the λ = 0/1 captions only when the corridor's edge set changed. **Trigger:** a
+visible stutter on fixes in Manhattan. **Effort:** ½ day.
+
+## GOES cloud-top height at 2 km
+
+`ABI-L2-ACHAC` is 10 km, so the "low vs mid/high" class is one pixel for ~16 lattice cells
+and `top is None` with a liquid phase reads as mid/high. The 2 km `ACHA2KC` product isn't
+on the public bucket today; check again before the build-out, else derive "low" from the
+11 µm brightness temperature in `CMIPC` C14 (fog is warm). **Trigger:** the POC verdict.

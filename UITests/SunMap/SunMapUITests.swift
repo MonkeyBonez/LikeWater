@@ -164,21 +164,72 @@ final class SunMapUITests: XCTestCase {
     }
 
     /// The field covers the visible map (portrait, ~900 m wide), not a 400 m square:
-    /// the old square scored 2,231 edges here. Zooming well out is capped and says so.
+    /// the old square scored 2,231 edges here. Zoomed out, every street gives way to sun
+    /// by block — and the whole screen stays covered, however far out.
     func testFieldCoversTheWholeScreen() throws {
         launch(at: "37.78415,-122.40060", date: "2026-09-23T20:00:00Z")
         waitForField()
         let screen = scoredEdges()
         shoot("sunmap-50-whole-screen")
         XCTAssertGreaterThan(screen, 3_500, stats.label)
+        XCTAssertFalse(stats.label.contains("blocks"), stats.label)
 
         let map = app.maps.firstMatch
-        map.pinch(withScale: 0.25, velocity: -1.5)
         let status = app.staticTexts["sunStatus"]
-        XCTAssertTrue(status.waitForExistence(timeout: 30), "zoomed out past the cap should say so")
-        XCTAssertEqual(status.label, "Zoom in to see the sun on every street")
-        sleep(2)
-        shoot("sunmap-51-zoomed-out-capped")
+        func blocks() -> Int {
+            guard let r = stats.label.range(of: " blocks") else { return 0 }
+            return Int(stats.label[..<r.lowerBound].split(separator: " ").last?.replacingOccurrences(of: ",", with: "") ?? "") ?? 0
+        }
+        func settle(_ name: String, minBlocks: Int) {
+            // Tiles stream in; wait for the status, then for the last tile, then read once.
+            let deadline = Date().addingTimeInterval(60)
+            var label = stats.exists ? stats.label : ""
+            while Date() < deadline {
+                label = stats.exists ? stats.label : ""
+                if status.exists, status.label.hasPrefix("Sun by block"), label.contains("blocks"), !label.contains("scoring") { break }
+                usleep(300_000)
+            }
+            shoot(name)
+            XCTAssertTrue(status.exists && status.label.hasPrefix("Sun by block"), status.exists ? status.label : "no status")
+            let n = Int(label.components(separatedBy: " blocks")[0].split(separator: " ").last?.replacingOccurrences(of: ",", with: "") ?? "") ?? 0
+            XCTAssertGreaterThan(n, minBlocks, label)
+        }
+        map.pinch(withScale: 0.25, velocity: -1.5)       // ~4 km: 139 m blocks
+        settle("sunmap-51-blocks-4km", minBlocks: 300)
+        map.pinch(withScale: 0.3, velocity: -1.5)        // ~13 km: 556 m blocks, the whole city
+        settle("sunmap-52-blocks-city", minBlocks: 150)
+        map.pinch(withScale: 0.5, velocity: -1.5)        // ~30 km: the Bay Area, Berkeley too
+        settle("sunmap-53-blocks-bay", minBlocks: 60)
+        XCTAssertTrue(stats.label.contains("San Francisco") || stats.label.contains("Berkeley"), stats.label)
+    }
+
+    /// A pan scores only what came into view: the tiles still on screen come from the cache,
+    /// and the field never goes blank in between.
+    func testPanningReusesScoredTiles() throws {
+        launch(at: "37.78415,-122.40060", date: "2026-09-23T20:00:00Z")
+        waitForField()
+        var settle = Date().addingTimeInterval(30)
+        while Date() < settle, stats.label.contains("scoring") { usleep(200_000) }
+        let before = stats.label
+        func cached() -> Int {
+            guard let r = stats.label.range(of: " cached") else { return -1 }
+            return Int(stats.label[..<r.lowerBound].split(separator: " ").last ?? "") ?? -1
+        }
+        // A real pan: drag 40 % of the screen, no fling (a swipe throws the map a screen or more).
+        let map = app.maps.firstMatch
+        let from = map.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.45))
+        let to = map.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.45))
+        from.press(forDuration: 0.05, thenDragTo: to)
+        let t0 = Date()
+        settle = Date().addingTimeInterval(30)
+        while Date() < settle, stats.label == before { usleep(50_000) }
+        let firstChange = Date().timeIntervalSince(t0)
+        while Date() < settle, stats.label.contains("scoring") { usleep(200_000) }
+        shoot("sunmap-55-after-pan")
+        XCTAssertNotEqual(stats.label, before, "the field must follow the pan")
+        XCTAssertGreaterThan(cached(), 0, "tiles still on screen must come from the cache: \(stats.label)")
+        print("pan → first new tiles on screen in \(String(format: "%.2f", firstChange)) s")
+        XCTAssertLessThan(firstChange, 3, "a pan must not wait for the whole screen to be re-scored")
     }
 
     /// The app opens where the user is. The fix lands a moment after launch — after the

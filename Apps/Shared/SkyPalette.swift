@@ -19,6 +19,14 @@ enum SkyPalette {
         return (lerp(flat, clearSun, t), lerp(flat, clearMixed, t), lerp(flat, clearShade, t))
     }
 
+    /// A block's fill for its sunny share: shade → mixed → sun, then faded by the beam.
+    /// Translucent, so streets stay readable under the density view.
+    static func cell(fraction: Double, beam: Double, alpha: CGFloat = 0.42) -> UIColor {
+        let f = CGFloat(min(1, max(0, fraction)))
+        let base = f < 0.5 ? lerp(clearShade, clearMixed, f * 2) : lerp(clearMixed, clearSun, (f - 0.5) * 2)
+        return fade(base, beam: beam).withAlphaComponent(alpha)
+    }
+
     static func lerp(_ a: UIColor, _ b: UIColor, _ t: CGFloat) -> UIColor {
         var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
         var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0

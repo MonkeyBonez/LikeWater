@@ -2,10 +2,6 @@ import SwiftUI
 import MapKit
 import LikeWaterEngine
 
-final class SunnyOverlay: MKMultiPolyline {}
-final class MixedOverlay: MKMultiPolyline {}
-final class ShadedOverlay: MKMultiPolyline {}
-
 struct SunMapMapView: UIViewRepresentable {
     @ObservedObject var model: SunMapModel
 
@@ -34,9 +30,10 @@ struct SunMapMapView: UIViewRepresentable {
         if context.coordinator.rendered != model.overlayVersion {
             context.coordinator.rendered = model.overlayVersion
             context.coordinator.render(on: map, field: model.field)
-        } else if beamChanged {
+        }
+        if beamChanged {
             for overlay in map.overlays {
-                if let r = map.renderer(for: overlay) as? MKMultiPolylineRenderer {
+                if let r = map.renderer(for: overlay) {
                     context.coordinator.style(r, for: overlay, beam: beam)
                     r.setNeedsDisplay()
                 }
@@ -57,25 +54,13 @@ struct SunMapMapView: UIViewRepresentable {
         var recentered = 0
         /// The next region change is ours, not the user's.
         var programmatic = false
+        /// Overlays on the map, by score tile.
+        var shown: [SunTileKey: SunOverlays.Shown] = [:]
 
         init(model: SunMapModel) { self.model = model }
 
         func render(on map: MKMapView, field: SunField?) {
-            map.removeOverlays(map.overlays)
-            guard let field else { return }
-            var sunny: [MKPolyline] = [], mixed: [MKPolyline] = [], shaded: [MKPolyline] = []
-            for edge in field.edges {
-                var pair = [edge.a, edge.b]
-                let line = MKPolyline(coordinates: &pair, count: 2)
-                switch edge.bucket {
-                case .sunny: sunny.append(line)
-                case .mixed: mixed.append(line)
-                case .shaded: shaded.append(line)
-                }
-            }
-            if !shaded.isEmpty { map.addOverlay(ShadedOverlay(shaded), level: .aboveRoads) }
-            if !mixed.isEmpty { map.addOverlay(MixedOverlay(mixed), level: .aboveRoads) }
-            if !sunny.isEmpty { map.addOverlay(SunnyOverlay(sunny), level: .aboveRoads) }
+            SunOverlays.sync(map, field: field, shown: &shown)
         }
 
         func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
@@ -92,30 +77,35 @@ struct SunMapMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            guard let multi = overlay as? MKMultiPolyline else { return MKOverlayRenderer(overlay: overlay) }
-            let renderer = MKMultiPolylineRenderer(multiPolyline: multi)
+            let renderer: MKOverlayRenderer
+            if let lines = overlay as? SunLinesOverlay {
+                let r = MKMultiPolylineRenderer(multiPolyline: lines)
+                r.lineCap = .round
+                renderer = r
+            } else if let cells = overlay as? SunCellsOverlay {
+                renderer = MKMultiPolygonRenderer(multiPolygon: cells)
+            } else {
+                return MKOverlayRenderer(overlay: overlay)
+            }
             style(renderer, for: overlay, beam: renderedBeam)
-            renderer.lineCap = .round
             return renderer
         }
 
         /// The palette under a given beam strength. At 1 it is the clear-sky palette;
         /// as the beam fades, sun and mixed edges fall toward the same flat light as
         /// shade, because under cloud there is no shadow to be on the wrong side of.
-        func style(_ renderer: MKMultiPolylineRenderer, for overlay: MKOverlay, beam: Double) {
-            let palette = SkyPalette.colors(beam: beam)
-            switch overlay {
-            case is SunnyOverlay:
-                renderer.strokeColor = palette.sun
-                renderer.lineWidth = 6
-            case is MixedOverlay:
-                renderer.strokeColor = palette.mixed
-                renderer.lineWidth = 5
-            case is ShadedOverlay:
-                renderer.strokeColor = palette.shade
-                renderer.lineWidth = 5
-            default:
-                break
+        func style(_ renderer: MKOverlayRenderer, for overlay: MKOverlay, beam: Double) {
+            if let lines = overlay as? SunLinesOverlay, let r = renderer as? MKMultiPolylineRenderer {
+                let palette = SkyPalette.colors(beam: beam)
+                switch lines.bucket {
+                case .sunny: r.strokeColor = palette.sun; r.lineWidth = 6
+                case .mixed: r.strokeColor = palette.mixed; r.lineWidth = 5
+                case .shaded: r.strokeColor = palette.shade; r.lineWidth = 5
+                }
+            } else if let cells = overlay as? SunCellsOverlay, let r = renderer as? MKMultiPolygonRenderer {
+                r.fillColor = SkyPalette.cell(fraction: cells.fraction, beam: beam)
+                r.strokeColor = nil
+                r.lineWidth = 0
             }
         }
     }

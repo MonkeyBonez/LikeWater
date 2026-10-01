@@ -8,7 +8,10 @@ a scan logged in both counts once.
 Daytime only (09:00–17:00 Pacific). Each source says "sun" when its beam ≥ 0.5:
   agreement      share of cell-times where GOES and Open-Meteo say the same thing
   disagreements  at the SFO/OAK cells, who matches the METAR (no BKN/OVC/VV layer = sun)
-  latency        median minutes from scan end to the data being on the bucket
+  latency        median minutes from scan end to the data being on the bucket (what a
+                 10-minute job could deliver); "delivery" is the POC's own hourly cadence
+  METAR          a station comparison counts only when the observation is within 20 min
+                 of the scan (SFO/OAK report hourly, at :56, plus specials)
   burn-off       on mornings METAR reports fog/stratus, minutes between each source's
                  first "sun" at SFO and the METAR's first sun
 Decision: build the GOES job if GOES is right in ≥ 70 % of disagreements and the median
@@ -48,27 +51,38 @@ def sunny(beam) -> bool | None:
     return None if beam is None else beam >= 0.5
 
 
+METAR_MAX_AGE_MIN = 20
+
+
 def score(records: list[dict]) -> dict:
     agree = total = 0
     dis_goes = dis_om = dis_n = 0
-    latencies = []
+    latencies, deliveries = [], []
     first_sun = defaultdict(dict)      # day → source → minutes after midnight
+    earliest = {}                      # day → first logged daytime minute
     days = set()
     for r in records:
         t = datetime.fromisoformat(r["scan_end"]).astimezone(PACIFIC)
         if not (9 <= t.hour < 17):
             continue
         days.add(t.date())
+        earliest[t.date()] = min(earliest.get(t.date(), 10**6), t.hour * 60 + t.minute)
         latencies.append(r["latency_s"] / 60)
+        if r.get("logged"):
+            deliveries.append((datetime.fromisoformat(r["logged"]) - datetime.fromisoformat(r["scan_end"])).total_seconds() / 60)
         for c in r["cells"]:
             gs, os_ = sunny(c["goes"]["beam"]), sunny((c.get("om") or {}).get("beam"))
             if gs is None or os_ is None:
                 continue
             total += 1; agree += gs == os_
         for station, cell in r.get("stations", {}).items():
-            truth = metar_sunny((r.get("metar") or {}).get(station))
+            obs = (r.get("metar") or {}).get(station)
+            truth = metar_sunny(obs)
             c = next((c for c in r["cells"] if [c["lat"], c["lon"]] == cell), None)
-            if truth is None or c is None:
+            if truth is None or c is None or not obs.get("time"):
+                continue
+            age = abs((datetime.fromisoformat(obs["time"].replace("Z", "+00:00")) - datetime.fromisoformat(r["scan_end"])).total_seconds()) / 60
+            if age > METAR_MAX_AGE_MIN:
                 continue
             gs, os_ = sunny(c["goes"]["beam"]), sunny((c.get("om") or {}).get("beam"))
             if gs is not None and os_ is not None and gs != os_:
@@ -78,7 +92,9 @@ def score(records: list[dict]) -> dict:
                 for name, s in (("metar", truth), ("goes", gs), ("om", os_)):
                     if s and name not in first_sun[t.date()]:
                         first_sun[t.date()][name] = minute
-    fog_days = [d for d, f in first_sun.items() if f.get("metar", 0) > 9 * 60 + 30]
+    # A fog morning needs the morning in the log: METAR's first sun after 9:30 only counts
+    # when scans from 9:15 or earlier are there, else a late-starting log fakes a fog day.
+    fog_days = [d for d, f in first_sun.items() if f.get("metar", 0) > 9 * 60 + 30 and earliest.get(d, 10**6) <= 9 * 60 + 15]
     burn = {src: [abs(first_sun[d][src] - first_sun[d]["metar"]) for d in fog_days if src in first_sun[d]]
             for src in ("goes", "om")}
     out = {
@@ -89,6 +105,7 @@ def score(records: list[dict]) -> dict:
         "goes_right_share": dis_goes / dis_n if dis_n else None,
         "om_right_share": dis_om / dis_n if dis_n else None,
         "median_latency_min": statistics.median(latencies) if latencies else None,
+        "median_delivery_min": round(statistics.median(deliveries), 1) if deliveries else None,
         "fog_mornings": len(fog_days),
         "burnoff_error_min": {k: statistics.median(v) if v else None for k, v in burn.items()},
     }

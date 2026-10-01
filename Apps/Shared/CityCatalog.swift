@@ -229,12 +229,20 @@ actor CityCatalog {
     }
 
     /// The single city most of a box falls in (prefer downloaded, then most overlap).
-    func localCity(covering box: BBox) -> CityDescriptor? {
-        local().filter { $0.bbox.intersects(box) }.sorted {
-            if $0.isBundled != $1.isBundled { return !$0.isBundled }
+    func localCity(covering box: BBox) -> CityDescriptor? { localCities(intersecting: box).first }
+
+    /// Every single-file city touching a box, most overlap first (a downloaded copy of the
+    /// same city beats the shipped one; a downloaded *other* city never beats the one on screen).
+    func localCities(intersecting box: BBox) -> [CityDescriptor] {
+        var best: [String: CityDescriptor] = [:]
+        for c in local() where c.bbox.intersects(box) {
+            if let have = best[c.id], have.isBundled == false, c.isBundled { continue }
+            best[c.id] = c
+        }
+        return best.values.sorted {
             let a = $0.bbox.overlapArea(box), b = $1.bbox.overlapArea(box)
             return a != b ? a > b : area($0.bbox) < area($1.bbox)
-        }.first
+        }
     }
 
     func localCity(covering c: CLLocationCoordinate2D) -> CityDescriptor? {
@@ -289,21 +297,24 @@ actor CityCatalog {
     /// After a stitch from `buildKey` succeeded: mark it ready and delete every other build
     /// of the metro (sibling build directories and a flat sideloaded copy), never the one
     /// in use.
-    func markReady(metro id: String, directory: URL) {
+    @discardableResult
+    func markReady(metro id: String, directory: URL) -> Bool {
         let fm = FileManager.default
         let idDir = Self.downloadsDirectory.appendingPathComponent(id, isDirectory: true)
-        guard directory.standardizedFileURL.deletingLastPathComponent() == idDir.standardizedFileURL else { return }
+        guard directory.standardizedFileURL.deletingLastPathComponent() == idDir.standardizedFileURL else { return false }
         let marker = directory.appendingPathComponent(".ready")
-        guard !fm.fileExists(atPath: marker.path) else { return }
+        guard !fm.fileExists(atPath: marker.path) else { return false }
         fm.createFile(atPath: marker.path, contents: Data())
+        var removed = false
         for item in (try? fm.contentsOfDirectory(at: idDir, includingPropertiesForKeys: [.isDirectoryKey])) ?? [] {
             if item.standardizedFileURL == directory.standardizedFileURL { continue }
             let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             if isDir || item.pathExtension == "lwbundle" || item.lastPathComponent == "metro.json" {
-                try? fm.removeItem(at: item)
+                if (try? fm.removeItem(at: item)) != nil { removed = true }
             }
         }
         metroCache = nil
+        return removed
     }
 
     func manifest() async throws -> RemoteManifest {
@@ -328,49 +339,57 @@ actor CityCatalog {
 
     /// Any metro covering a point: on the device first, then the server's.
     func metro(covering c: CLLocationCoordinate2D) async -> MetroDescriptor? {
-        guard let m = await metro(covering: BBox(minLat: c.latitude, minLon: c.longitude,
-                                                 maxLat: c.latitude, maxLon: c.longitude)),
-              m.covers(c) else { return nil }
-        return m
+        let point = BBox(minLat: c.latitude, minLon: c.longitude, maxLat: c.latitude, maxLon: c.longitude)
+        return await metros(intersecting: point).first { $0.covers(c) }
     }
 
-    /// The metro most of a box falls in. The phone's copy wins unless the server lists a
-    /// newer build, which is then fetched into its own directory with the phone's copy
-    /// kept as the fallback.
+    /// The metro most of a box falls in.
     func metro(covering box: BBox) async -> MetroDescriptor? {
-        let locals = localMetros().filter { $0.index.intersects(box) }
-            .sorted { $0.index.bbox.overlapArea(box) > $1.index.bbox.overlapArea(box) }
-        guard let baseURL, let manifest = try? await manifest() else { return locals.first }
-        let entries = (manifest.metros ?? []).filter { $0.bbox.intersects(box) }
-            .sorted { $0.bbox.overlapArea(box) > $1.bbox.overlapArea(box) }
-        guard let entry = entries.first else { return locals.first }
-        // Tiles live next to the index the manifest names: `<id>/` on Pages,
-        // `metros/<id>/<buildKey>/` on an S3 layout.
-        let remoteFolder = baseURL.appendingPathComponent((entry.index as NSString).deletingLastPathComponent, isDirectory: true)
-        if var local = locals.first(where: { $0.id == entry.id }),
-           !MetroIndex.isNewer(entry.buildKey, than: local.buildKey) {
-            if local.buildKey == entry.buildKey { local.remoteDirectory = remoteFolder }
-            return local
+        await metros(intersecting: box).first
+    }
+
+    /// Every metro touching a box, most overlap first. The phone's copy of a metro wins
+    /// unless the server lists a newer build, which is then fetched into its own directory
+    /// with the phone's copy kept as the fallback.
+    func metros(intersecting box: BBox) async -> [MetroDescriptor] {
+        var out = localMetros().filter { $0.index.intersects(box) }
+        if let baseURL, let manifest = try? await manifest() {
+            for entry in (manifest.metros ?? []).filter({ $0.bbox.intersects(box) }) {
+                // Tiles live next to the index the manifest names: `<id>/` on Pages,
+                // `metros/<id>/<buildKey>/` on an S3 layout.
+                let remoteFolder = baseURL.appendingPathComponent((entry.index as NSString).deletingLastPathComponent, isDirectory: true)
+                if let k = out.firstIndex(where: { $0.id == entry.id }) {
+                    if !MetroIndex.isNewer(entry.buildKey, than: out[k].buildKey) {
+                        // Same build: its files are at the index's folder. An *older* server
+                        // build must never feed a newer local one, so no remote at all then
+                        // (a pan into tiles the phone lacks shows the banner, not mixed builds).
+                        out[k].remoteDirectory = out[k].buildKey == entry.buildKey ? remoteFolder : nil
+                        continue
+                    }
+                }
+                let cacheKey = entry.id + "@" + entry.buildKey
+                var metro = remoteMetroCache[cacheKey]
+                if metro == nil {
+                    guard let (data, response) = try? await URLSession.shared.data(from: baseURL.appendingPathComponent(entry.index)),
+                          (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+                          let index = try? JSONDecoder().decode(MetroIndex.self, from: data) else { continue }
+                    let dir = Self.downloadsDirectory.appendingPathComponent(index.id, isDirectory: true)
+                        .appendingPathComponent(index.buildKey, isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try? data.write(to: dir.appendingPathComponent("metro.json"))
+                    let older = out.first { $0.id == index.id && $0.localDirectory.standardizedFileURL != dir.standardizedFileURL }
+                    metro = MetroDescriptor(index: index, localDirectory: dir, remoteDirectory: remoteFolder,
+                                            fallbackDirectory: older?.localDirectory, fallbackIndex: older?.index)
+                    remoteMetroCache[cacheKey] = metro
+                    metroCache = nil
+                }
+                if let metro {
+                    out.removeAll { $0.id == metro.id }
+                    out.append(metro)
+                }
+            }
         }
-        if let local = locals.first, local.id != entry.id,
-           local.index.bbox.overlapArea(box) >= entry.bbox.overlapArea(box) {
-            return local
-        }
-        let cacheKey = entry.id + "@" + entry.buildKey
-        if let cached = remoteMetroCache[cacheKey] { return cached }
-        guard let (data, response) = try? await URLSession.shared.data(from: baseURL.appendingPathComponent(entry.index)),
-              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
-              let index = try? JSONDecoder().decode(MetroIndex.self, from: data) else { return locals.first }
-        let dir = Self.downloadsDirectory.appendingPathComponent(index.id, isDirectory: true)
-            .appendingPathComponent(index.buildKey, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? data.write(to: dir.appendingPathComponent("metro.json"))
-        let older = locals.first { $0.id == index.id && $0.localDirectory.standardizedFileURL != dir.standardizedFileURL }
-        let metro = MetroDescriptor(index: index, localDirectory: dir, remoteDirectory: remoteFolder,
-                                    fallbackDirectory: older?.localDirectory, fallbackIndex: older?.index)
-        remoteMetroCache[cacheKey] = metro
-        metroCache = nil
-        return metro
+        return out.sorted { $0.index.bbox.overlapArea(box) > $1.index.bbox.overlapArea(box) }
     }
 
     func remoteCity(covering box: BBox) async throws -> RemoteManifest.City? {
@@ -386,15 +405,16 @@ actor CityCatalog {
         if places.contains(where: { $0.1.intersects(box) }) {
             return places.contains(where: { $0.1.contains(box) }) ? .covered : .partial
         }
-        if baseURL == nil && places.isEmpty { return .noServer }
+        // Nothing on the phone touches the box and nothing could be fetched: say so, rather
+        // than naming a shipped city a thousand kilometres away as the nearest.
+        if baseURL == nil { return .noServer }
         let c = (box.centerLat, box.centerLon)
         func distance(_ b: BBox) -> Double {
             let lat = min(max(c.0, b.minLat), b.maxLat), lon = min(max(c.1, b.minLon), b.maxLon)
             return haversineMeters(c.0, c.1, lat, lon)
         }
         let nearest = places.min { distance($0.1) < distance($1.1) }
-        let state = CoverageState.notBuilt(nearest: nearest?.0, km: nearest.map { distance($0.1) / 1000 })
-        return baseURL == nil && manifest == nil ? (nearest == nil ? .noServer : state) : state
+        return .notBuilt(nearest: nearest?.0, km: nearest.map { distance($0.1) / 1000 })
     }
 
     /// Does anything, here or on the server, cover this point? Cheap after the first call.
@@ -418,9 +438,10 @@ actor CityCatalog {
     }
 
     static func fetch(_ source: URL, to destination: URL,
-                      progress: (@Sendable (Double) -> Void)? = nil) async throws {
-        let (temp, response) = try await URLSession.shared.download(from: source,
-                                                                    delegate: progress.map(ProgressRelay.init))
+                      progress: (@Sendable (Double) -> Void)? = nil,
+                      session: URLSession = .shared) async throws {
+        let (temp, response) = try await session.download(from: source,
+                                                          delegate: progress.map(ProgressRelay.init))
         guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
             throw CityCatalogError.downloadFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0) for \(source.lastPathComponent)")
         }

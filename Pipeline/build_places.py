@@ -12,7 +12,7 @@ synthesis share to cache/build_log.jsonl. Sequential (each build peaks at 2–5 
 A failure is logged and the next entry still runs; the failed one is retried next time
 because it never reached the manifest.
 """
-import argparse, json, re, subprocess, sys, time
+import argparse, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,15 +55,35 @@ def newest_dated_url(extract: str) -> str:
     return f"{GEOFABRIK}/{extract}-latest.osm.pbf"
 
 
+def md5_of(path: Path) -> str:
+    import hashlib
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def download(entry, log=print) -> Path:
     path = extract_path(entry)
     if path.exists():
         return path
     PBF.mkdir(parents=True, exist_ok=True)
     url = newest_dated_url(entry["extract"])
-    part = path.with_suffix(".part")
+    # The part file is named after the dated snapshot, so a resume (curl -C -) can only
+    # continue the same file, never splice two snapshots; Geofabrik's .md5 is checked.
+    part = PBF / (url.rsplit("/", 1)[1] + ".part")
     log(f"  downloading {url}")
     subprocess.run(["curl", "-fsSL", "--retry", "5", "--max-redirs", "5", "-C", "-", "-o", str(part), url], check=True)
+    try:
+        import urllib.request
+        expected = urllib.request.urlopen(url + ".md5", timeout=30).read().decode().split()[0]
+        actual = md5_of(part)
+        if actual != expected:
+            part.unlink()
+            raise RuntimeError(f"md5 mismatch for {url}: {actual} != {expected}")
+    except (OSError, IndexError) as e:
+        log(f"  (no md5 to verify: {str(e)[:80]})")
     part.rename(path)
     return path
 
@@ -81,9 +101,21 @@ def build_args(entry, pbf: Path) -> list[str]:
     return args
 
 
+def time_command() -> list[str]:
+    """`/usr/bin/time` with the flag that reports peak memory: -l on macOS (bytes),
+    -v on GNU (kbytes); nothing when no `time` binary exists (plain Ubuntu runners)."""
+    import platform
+    if not os.path.exists("/usr/bin/time"):
+        return []
+    return ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
+
+
 def peak_rss_gb(log_text: str):
-    m = re.search(r"(\d+)\s+maximum resident set size", log_text)
-    return round(int(m.group(1)) / 1e9, 2) if m else None
+    m = re.search(r"(\d+)\s+maximum resident set size", log_text)          # macOS, bytes
+    if m:
+        return round(int(m.group(1)) / 1e9, 2)
+    m = re.search(r"Maximum resident set size \(kbytes\):\s*(\d+)", log_text)  # GNU, kbytes
+    return round(int(m.group(1)) / 1e6, 2) if m else None
 
 
 def build(entry, log=print) -> dict:
@@ -93,8 +125,9 @@ def build(entry, log=print) -> dict:
         pbf = download(entry, log)
         LOGS.mkdir(parents=True, exist_ok=True)
         log_path = LOGS / f"{entry['id']}.log"
-        cmd = ["/usr/bin/time", "-l", sys.executable, str(HERE / "build_metro.py")] + build_args(entry, pbf)
-        log(f"  {' '.join(cmd[3:])}")
+        prefix = time_command()
+        cmd = prefix + [sys.executable, str(HERE / "build_metro.py")] + build_args(entry, pbf)
+        log(f"  {' '.join(cmd[len(prefix) + 1:])}")
         with open(log_path, "w") as f:
             rc = subprocess.run(cmd, cwd=HERE, stdout=f, stderr=subprocess.STDOUT).returncode
         text = log_path.read_text()
@@ -151,7 +184,7 @@ def entry_for_cell(cell: str, places: list, geocode=None):
 
 def append_entry(entry, path=HERE / "metros.yaml"):
     """Appends one entry to metros.yaml as text, keeping the file's comments."""
-    lines = [f"  - id: {entry['id']}", f"    name: {entry['name']}", f"    extract: {entry['extract']}",
+    lines = [f"  - id: {entry['id']}", f"    name: {json.dumps(entry['name'])}", f"    extract: {entry['extract']}",
              "    places: [" + ", ".join(json.dumps(p) for p in entry["places"]) + "]",
              f"    demo: {entry['demo']}", "    # added by build_places.py --cell (a user request)"]
     with open(path, "a") as f:

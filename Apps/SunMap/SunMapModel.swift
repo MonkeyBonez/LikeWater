@@ -28,8 +28,11 @@ final class SunMapModel: ObservableObject {
     /// The user has moved the map themselves; a late fix must not yank it back.
     var userMovedMap = false
     private var visibleBox: BBox?
-    private var scoredBox: BBox?
+    private var scoredPlan: SunArea.Plan?
     private var panDebounce: Task<Void, Never>?
+    private var prefetchTask: Task<Void, Never>?
+    /// Which recompute is current; streamed partials of an older one are dropped.
+    private var generation = 0
     /// Set when nothing is built under the screen: why, plus the sky and sun, which work anywhere.
     @Published var notCovered: (state: CoverageState, sky: SkyCondition?, sun: SolarPosition)?
     @Published var requestSent = false
@@ -128,13 +131,8 @@ final class SunMapModel: ObservableObject {
         panDebounce = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard let self, !Task.isCancelled else { return }
-            if self.notCovered != nil || SunArea.needsRecompute(visible: visible, scored: self.scoredBox) {
+            if self.notCovered != nil || SunArea.needsRecompute(visible: visible, scored: self.scoredPlan) {
                 self.recompute(force: true)
-            } else {
-                // The field still covers the screen, but the screen itself changed (a pinch
-                // that ends past the cap): the status follows the view, not the last score.
-                self.clipped = SunArea.scoring(for: visible).clipped
-                self.updateStatus()
             }
         }
     }
@@ -172,36 +170,60 @@ final class SunMapModel: ObservableObject {
     func recompute(force: Bool) {
         guard let center else { return }
         task?.cancel()
+        prefetchTask?.cancel()
         isComputing = true
+        generation += 1
+        let gen = generation
         task = Task { [weak self] in
             guard let self else { return }
             do {
                 let visible = self.visibleBox ?? SunArea.around(center, metres: Self.radius)
-                let area = SunArea.scoring(for: visible)
-                let result = try await self.service.field(in: area.box, at: self.selectedDate,
-                                                          skyMode: self.skyMode)
+                guard let plan = SunArea.plan(for: visible) else { throw SunServiceError.tooFarOut }
+                // Tiles land as they are scored; the screen never waits for the last one. A
+                // partial from a superseded recompute is dropped (its own task cancels late).
+                let result = try await self.service.field(plan, at: self.selectedDate,
+                                                          skyMode: self.skyMode) { partial in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.generation == gen else { return }
+                        self.field = partial
+                        self.overlayVersion += 1
+                    }
+                }
                 guard !Task.isCancelled else { return }
                 self.field = result
                 self.notCovered = nil
                 self.lastComputedCenter = center
-                self.scoredBox = area.box
-                self.clipped = area.clipped
+                self.scoredPlan = plan
+                self.clipped = false
                 self.daylight = await self.service.daylightWindow(at: center, on: self.selectedDate)
                 self.overlayVersion += 1
                 self.error = nil
                 self.updateStatus()
                 self.skyStatus = Self.skyLine(for: result)
                 self.cityName = result.city
+                // Score the ring around the screen quietly, so the next pan is already there.
+                let date = self.selectedDate
+                self.prefetchTask = Task.detached(priority: .background) { [service = self.service] in
+                    await service.prefetch(plan, at: date)
+                }
             } catch SunServiceError.notCovered(let state, let sky, let sun, _) {
                 guard !Task.isCancelled else { return }
                 self.field = nil
-                self.scoredBox = nil
+                self.scoredPlan = nil
                 self.notCovered = (state, sky, sun)
                 self.requestSent = false
                 self.error = nil
                 self.status = ""
                 self.skyStatus = sun.isUp ? (sky?.summary ?? "No forecast") : ""
                 self.daylight = await self.service.daylightWindow(at: center, on: self.selectedDate)
+                self.overlayVersion += 1
+            } catch SunServiceError.tooFarOut {
+                guard !Task.isCancelled else { return }
+                self.field = nil
+                self.scoredPlan = nil
+                self.notCovered = nil
+                self.error = nil
+                self.status = "Zoom in to see sun data"
                 self.overlayVersion += 1
             } catch is CancellationError {
                 return
@@ -231,10 +253,13 @@ final class SunMapModel: ObservableObject {
     /// One status line, from the current state: sun down, demo area, zoomed out past the
     /// cap, or a screen only partly covered.
     func updateStatus() {
-        guard let field else { status = ""; return }
+        guard let field else { return }
         if !field.sun.isUp { status = "Sun is down." }
         else if showingDemoArea { status = "No map data where you are — showing SoMa" }
-        else if clipped { status = "Zoom in to see the sun on every street" }
+        else if field.detail.isBlocks {
+            status = "Sun by block · zoom in for streets"
+            if field.missingTiles > 0 { status += " · \(field.missingTiles) areas not downloaded" }
+        }
         else if field.coverage == .partial { status = "Only part of this screen has sun data" }
         else { status = "" }
     }

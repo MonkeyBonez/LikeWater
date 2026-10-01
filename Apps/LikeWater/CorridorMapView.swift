@@ -124,6 +124,7 @@ struct CorridorMapView: UIViewRepresentable {
         }
 
         func render(on map: MKMapView, snapshot: CorridorSnapshot?) {
+            clearAmbient(on: map)
             map.removeOverlays(map.overlays)
             map.removeAnnotations(map.annotations)
             guard let snapshot else { return }
@@ -160,23 +161,48 @@ struct CorridorMapView: UIViewRepresentable {
             map.addAnnotation(user)
         }
 
-        /// The sun around the map centre, before there is a walk: same three bands as the
-        /// corridor's sun layer, so the colours mean the same thing in both states.
+        /// Overlays of the ambient sun field, by score tile (diffed on pan, like Sun Map).
+        var ambientShown: [SunTileKey: SunOverlays.Shown] = [:]
+        var ambientBeam = 1.0
+
+        /// The sun around the map centre, before there is a walk: same colours as the
+        /// corridor's sun layer, so they mean the same thing in both states.
         func renderAmbient(on map: MKMapView, field: SunField) {
-            map.removeOverlays(map.overlays)
+            map.removeOverlays(map.overlays.filter { !($0 is SunLinesOverlay || $0 is SunCellsOverlay) })
             map.removeAnnotations(map.annotations)
-            var bands: [[MKPolyline]] = [[], [], []]
-            for edge in field.edges {
-                var pair = [edge.a, edge.b]
-                bands[edge.bucket.rawValue].append(MKPolyline(coordinates: &pair, count: 2))
-            }
-            let beam = Float(model.beamStrength)
-            for (i, lines) in bands.enumerated() where !lines.isEmpty {
-                map.addOverlay(CorridorBand(lines, band: i, beam: beam), level: .aboveRoads)
+            SunOverlays.sync(map, field: field, shown: &ambientShown)
+            let beam = model.beamStrength
+            if abs(beam - ambientBeam) > 0.02 {
+                // The sky changed, not the geometry: recolour the renderers in place.
+                ambientBeam = beam
+                for shown in ambientShown.values {
+                    for o in shown.overlays {
+                        guard let r = map.renderer(for: o) else { continue }
+                        styleAmbient(r, for: o, beam: beam)
+                        r.setNeedsDisplay()
+                    }
+                }
             }
             if let user = model.effectiveUserCoordinate {
                 let dot = UserDotAnnotation(); dot.coordinate = user; dot.title = "You"
                 map.addAnnotation(dot)
+            }
+        }
+
+        func clearAmbient(on map: MKMapView) {
+            for shown in ambientShown.values { map.removeOverlays(shown.overlays) }
+            ambientShown.removeAll()
+        }
+
+        func styleAmbient(_ renderer: MKOverlayRenderer, for overlay: MKOverlay, beam: Double) {
+            let sunPalette = colors(for: .sun)
+            if let lines = overlay as? SunLinesOverlay, let r = renderer as? MKMultiPolylineRenderer {
+                r.strokeColor = SkyPalette.fade(sunPalette[lines.bucket.rawValue].0, beam: beam)
+                r.lineWidth = sunPalette[lines.bucket.rawValue].1
+                r.lineCap = .round
+            } else if let cells = overlay as? SunCellsOverlay, let r = renderer as? MKMultiPolygonRenderer {
+                r.fillColor = SkyPalette.cell(fraction: cells.fraction, beam: beam)
+                r.strokeColor = nil
             }
         }
 
@@ -254,6 +280,16 @@ struct CorridorMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             let layer = model.snapshot?.layer ?? (model.destination == nil && model.ambient != nil ? .sun : .crossings)
             let palette = colors(for: layer)
+            if let lines = overlay as? SunLinesOverlay {
+                let r = MKMultiPolylineRenderer(multiPolyline: lines)
+                styleAmbient(r, for: overlay, beam: model.beamStrength)
+                return r
+            }
+            if let cells = overlay as? SunCellsOverlay {
+                let r = MKMultiPolygonRenderer(multiPolygon: cells)
+                styleAmbient(r, for: overlay, beam: model.beamStrength)
+                return r
+            }
             if let route = overlay as? RouteLine {
                 let renderer = MKMultiPolylineRenderer(multiPolyline: route)
                 if route.casing {

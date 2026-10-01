@@ -442,6 +442,74 @@ case "route":
     writeGeoJSON(features, meta: ["slack": slack, "sunWeight": weight, "departure": iso.string(from: departure),
                                   "scoredPairs": timeAware.scoredPairs, "timelineMs": timeAware.computeMs], to: out)
 
+case "blocks":
+    // Sun by block (the zoomed-out field): samples the longest edges per cell of a metro
+    // tile and scores them. Measures cost, and the seam error of scoring a tile from its
+    // own buildings only (what the apps do zoomed out) against the stitched neighbourhood.
+    //   lwtool blocks --metro ../Server/nyc --center LAT,LON --at ISO [--level 2] --out blocks.geojson
+    let center = coordinate(option("center"), "center")
+    let level = Int(option("level") ?? "2") ?? 2
+    let iso = ISO8601DateFormatter()
+    guard let at = iso.date(from: option("at") ?? "") else { fail("--at needs an ISO 8601 UTC time") }
+    let key = SunLattice.key(.blocks(level: level), lat: center.lat, lon: center.lon)
+    let cell = SunLattice.cellSize(level: level)
+    let sun = Solar.position(latitude: key.box.centerLat, longitude: key.box.centerLon, date: at)
+    func blocks(_ g: PedestrianGraph, _ b: BuildingStore) -> ([SunCell], Int, Double) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let ids = g.edges(in: key.box)
+        let picked = SunSampler.sample(graph: g, edges: ids, cellLat: cell.lat, cellLon: cell.lon)
+        var scorer = SunScorer(buildings: b)
+        let scores = scorer.score(graph: g, edges: picked.edges, sun: sun)
+        let cells = SunSampler.cells(graph: g, sampled: picked.edges, cellKeys: picked.cells, scores: scores,
+                                     cellLat: cell.lat, cellLon: cell.lon)
+        return (cells, picked.edges.count, (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+    }
+    // Stitched (buildings of the neighbourhood cast into this tile): the city as loaded.
+    let (stitched, nStitched, msStitched) = blocks(graph, city.buildings)
+    print(String(format: "tile %@ · level %d (%.0f m cells) · stitched: %d cells from %d sampled edges in %.1f ms",
+                 key.description, level, SunLattice.cellMetres(level: level, atLatitude: center.lat),
+                 stitched.count, nStitched, msStitched))
+    var features = stitched.map { c -> Feature in
+        Feature(coords: [(c.box.minLat, c.box.minLon), (c.box.minLat, c.box.maxLon), (c.box.maxLat, c.box.maxLon),
+                         (c.box.maxLat, c.box.minLon), (c.box.minLat, c.box.minLon)],
+                properties: ["sun": Double(c.sun), "sampled": c.sampled, "metres": c.metres, "mode": "stitched"])
+    }
+    if let dir = option("metro") {
+        // Alone: the one tile's file, its own buildings only — the zoomed-out path.
+        let base = URL(fileURLWithPath: dir)
+        let index = try MetroIndex.load(from: base.appendingPathComponent("metro.json"))
+        guard let t = index.tiles.first(where: { $0.i == key.i && $0.j == key.j }) else { fail("no tile \(key.i),\(key.j)") }
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let raw = try RawBundle(contentsOf: base.appendingPathComponent(t.file))
+        let far = index.far.map { try? RawBundle(contentsOf: base.appendingPathComponent($0.file)).terrain } ?? nil
+        let alone = try TileStitcher.stitch([raw], farTerrain: far)
+        let msLoad = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        let (cells, n, ms) = blocks(alone.graph, alone.buildings)
+        var byBox: [String: SunCell] = [:]
+        for c in stitched { byBox[String(format: "%.6f,%.6f", c.box.minLat, c.box.minLon)] = c }
+        var diffs: [Double] = [], border: [Double] = []
+        for c in cells {
+            guard let s = byBox[String(format: "%.6f,%.6f", c.box.minLat, c.box.minLon)] else { continue }
+            let d = abs(Double(c.sun - s.sun))
+            diffs.append(d)
+            let edgeDist = min(c.box.minLat - key.box.minLat, key.box.maxLat - c.box.maxLat,
+                               (c.box.minLon - key.box.minLon) * 0.8, (key.box.maxLon - c.box.maxLon) * 0.8) * 111_320
+            if edgeDist < 300 { border.append(d) }
+        }
+        let mean = diffs.reduce(0, +) / Double(max(diffs.count, 1))
+        let bucketFlips = zip(cells, cells.compactMap { byBox[String(format: "%.6f,%.6f", $0.box.minLat, $0.box.minLon)] })
+            .filter { SunBucket(fraction: $0.0.sun) != SunBucket(fraction: $0.1.sun) }.count
+        print(String(format: "alone (own buildings): load+stitch %.0f ms · %d cells from %d edges in %.1f ms · vs stitched: mean |Δsun| %.3f, max %.2f, within 300 m of the border %.3f (%d cells), bucket flips %d of %d",
+                     msLoad, cells.count, n, ms, mean, diffs.max() ?? 0,
+                     border.reduce(0, +) / Double(max(border.count, 1)), border.count, bucketFlips, diffs.count))
+        features += cells.map { c in
+            Feature(coords: [(c.box.minLat, c.box.minLon), (c.box.minLat, c.box.maxLon), (c.box.maxLat, c.box.maxLon),
+                             (c.box.maxLat, c.box.minLon), (c.box.minLat, c.box.minLon)],
+                    properties: ["sun": Double(c.sun), "sampled": c.sampled, "metres": c.metres, "mode": "alone"])
+        }
+    }
+    writeGeoJSON(features, meta: ["tile": key.description, "level": level, "at": iso.string(from: at)], to: out)
+
 default:
-    fail("usage: lwtool corridor|route|sun|sunbias|coverage|sky [options]")
+    fail("usage: lwtool corridor|route|blocks|sun|sunbias|coverage|sky [options]")
 }

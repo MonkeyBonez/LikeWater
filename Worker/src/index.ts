@@ -58,8 +58,15 @@ async function coverageRequest(req: Request, env: Env): Promise<Response> {
   let autoBuild = "off";
   if (env.AUTO_BUILD === "on" && usa) {
     const threshold = Number(env.AUTO_BUILD_THRESHOLD ?? "5");
-    if (count === threshold) autoBuild = await dispatchBuild(env, cell);
-    else autoBuild = count < threshold ? "below-threshold" : "already-triggered";
+    const marker = `dispatched:${cell}`;
+    if (count < threshold) autoBuild = "below-threshold";
+    else if (await env.REQUESTS.get(marker)) autoBuild = "already-triggered";
+    else {
+      // Marked only on success, so a failed dispatch (GitHub down, bad token) is retried
+      // by the next request past the threshold instead of being lost.
+      autoBuild = await dispatchBuild(env, cell);
+      if (autoBuild === "triggered") await env.REQUESTS.put(marker, new Date().toISOString());
+    }
   }
   return json({ cell, count, counted: true, usa, autoBuild });
 }
@@ -96,21 +103,26 @@ async function exportRequests(req: Request, env: Env): Promise<Response> {
 async function sky(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (env.SKY_PROXY !== "on") return json({ error: "sky proxy disabled" }, 404);
   const url = new URL(req.url);
+  // Only the parameters the apps send, so the cache key can't be spammed with variants.
+  const allowed = ["latitude", "longitude", "minutely_15", "hourly", "past_days", "forecast_days",
+                   "timeformat", "timezone", "models"];
+  const params = new URLSearchParams();
+  for (const k of allowed) { const v = url.searchParams.get(k); if (v !== null) params.set(k, v); }
+  // One upstream fetch per lattice query per 15-minute slot, shared by every phone. The
+  // Cache API does nothing on *.workers.dev, so the shared copy lives in KV (free tier:
+  // 1,000 writes/day — a few dozen distinct queries per slot; the owner's scaling lever).
+  const slot = Math.floor(Date.now() / 900_000);
+  const key = `sky:${slot}:${params.toString()}`;
+  const hit = await env.REQUESTS.get(key);
+  if (hit) return new Response(hit, { headers: { "content-type": "application/json", "cache-control": "public, max-age=900", "x-sky-cache": "hit" } });
   const upstream = new URL(env.OPEN_METEO_KEY ? "https://customer-api.open-meteo.com/v1/forecast"
                                               : "https://api.open-meteo.com/v1/forecast");
-  url.searchParams.forEach((v, k) => upstream.searchParams.set(k, v));
+  params.forEach((v, k) => upstream.searchParams.set(k, v));
   if (env.OPEN_METEO_KEY) upstream.searchParams.set("apikey", env.OPEN_METEO_KEY);
-  // Cache key without the key, rounded to the 15-minute step everyone shares.
-  const slot = Math.floor(Date.now() / 900_000);
-  const cacheKey = new Request(`https://sky.cache/${slot}?${url.searchParams.toString()}`);
-  const cache = caches.default;
-  const hit = await cache.match(cacheKey);
-  if (hit) return hit;
   const res = await fetch(upstream.toString());
-  const out = new Response(res.body, res);
-  out.headers.set("cache-control", "public, max-age=900");
-  if (res.ok) ctx.waitUntil(cache.put(cacheKey, out.clone()));
-  return out;
+  const body = await res.text();
+  if (res.ok) ctx.waitUntil(env.REQUESTS.put(key, body, { expirationTtl: 1800 }));
+  return new Response(body, { status: res.status, headers: { "content-type": "application/json", "cache-control": "public, max-age=900", "x-sky-cache": "miss" } });
 }
 
 export default {

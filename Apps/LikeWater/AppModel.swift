@@ -59,7 +59,7 @@ final class AppModel: ObservableObject {
     @Published var ambientError: String?
     private let sunService = SunService()
     private var ambientTask: Task<Void, Never>?
-    private var scoredBox: BBox?
+    private var scoredPlan: SunArea.Plan?
     private var visibleBox: BBox?
     private var mapCenter: CLLocationCoordinate2D?
     /// Fallback radius before the map has reported what is on screen.
@@ -79,6 +79,8 @@ final class AppModel: ObservableObject {
     @Published var notCovered: (state: CoverageState, sky: SkyCondition?, sun: SolarPosition?)?
     @Published var requestSent = false
     private var panDebounce: Task<Void, Never>?
+    private var ambientPrefetch: Task<Void, Never>?
+    private var ambientGeneration = 0
 
     /// The demo corner stands in for a position with no data, and the user hasn't moved the
     /// map since: derived, so it can't go stale after a pan into coverage.
@@ -114,7 +116,7 @@ final class AppModel: ObservableObject {
         panDebounce = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard let self, !Task.isCancelled, self.destination == nil else { return }
-            if self.notCovered != nil || SunArea.needsRecompute(visible: visible, scored: self.scoredBox) {
+            if self.notCovered != nil || SunArea.needsRecompute(visible: visible, scored: self.scoredPlan) {
                 self.refreshAmbient()
             }
         }
@@ -123,28 +125,48 @@ final class AppModel: ObservableObject {
     func refreshAmbient() {
         guard destination == nil, let center = mapCenter ?? effectiveUserCoordinate else { return }
         ambientTask?.cancel()
+        ambientPrefetch?.cancel()
+        ambientGeneration += 1
+        let gen = ambientGeneration
         let date = scrubDate
-        let area = SunArea.scoring(for: visibleBox ?? SunArea.around(center, metres: Self.ambientRadius))
+        let visible = visibleBox ?? SunArea.around(center, metres: Self.ambientRadius)
         ambientTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let field = try await self.sunService.field(in: area.box, at: date)
+                guard let plan = SunArea.plan(for: visible) else { throw SunServiceError.tooFarOut }
+                let field = try await self.sunService.field(plan, at: date) { partial in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.ambientGeneration == gen, self.destination == nil else { return }
+                        self.ambient = partial
+                        self.overlayVersion += 1
+                    }
+                }
                 guard !Task.isCancelled, self.destination == nil else { return }
                 self.ambient = field
+                self.ambientPrefetch = Task.detached(priority: .background) { [service = self.sunService] in
+                    await service.prefetch(plan, at: date)
+                }
                 self.notCovered = nil
-                self.scoredBox = area.box
-                self.ambientClipped = area.clipped
+                self.scoredPlan = plan
+                self.ambientClipped = false
                 self.ambientError = nil
                 self.daylight = await self.sunService.daylightWindow(at: center, on: date)
                 self.overlayVersion += 1
             } catch SunServiceError.notCovered(let state, let sky, let sun, _) {
                 guard !Task.isCancelled, self.destination == nil else { return }
                 self.ambient = nil
-                self.scoredBox = nil
+                self.scoredPlan = nil
                 self.ambientError = nil
                 self.notCovered = (state, sky, sun)
                 self.requestSent = false
                 self.overlayVersion += 1
+            } catch SunServiceError.tooFarOut {
+                guard !Task.isCancelled, self.destination == nil else { return }
+                self.ambient = nil
+                self.scoredPlan = nil
+                self.ambientError = "Zoom in to see sun data"
+                self.overlayVersion += 1
+            } catch is CancellationError {
             } catch {
                 guard !Task.isCancelled else { return }
                 self.ambient = nil
@@ -160,7 +182,8 @@ final class AppModel: ObservableObject {
     init() {
         location.start()
         applyLaunchOverrides()
-        if let start = userCoordinate { Task { try? await service.prepare(for: start) } }
+        // No warm-up `prepare` here: it raced the first `update`'s own prepare and could
+        // swap the service's city under it. The ambient field loads the city at launch anyway.
     }
 
     /// Launch arguments let the UI tests and demos pin a deterministic walk without
@@ -271,7 +294,7 @@ final class AppModel: ObservableObject {
         phase = .idle
         overlayVersion += 1
         Task { await service.clear() }
-        scoredBox = nil
+        scoredPlan = nil
         refreshAmbient()
     }
 
@@ -374,6 +397,9 @@ final class AppModel: ObservableObject {
             requestSent = false
             overlayVersion += 1
         } catch is CancellationError {
+            // The service dropped a stale result. If nobody newer is computing (our own
+            // task wasn't cancelled), ask again rather than sit on "Computing corridor…".
+            if !Task.isCancelled { scheduleRecompute(immediate: true) }
         } catch {
             phase = .failed(error.localizedDescription)
         }
@@ -381,14 +407,17 @@ final class AppModel: ObservableObject {
 
     private var walkStarted = false
 
-    /// Real GPS walks teach the pace model; simulated steps would teach it nonsense.
+    /// Real GPS walks teach the pace model; simulated steps would teach it nonsense. The
+    /// estimator is fed fixes (distance actually walked), not route lengths, which change
+    /// with every re-route.
     private func trackPace(_ snap: CorridorSnapshot) {
         guard let route = snap.route else { return }
         if !walkStarted {
             walkStarted = true
-            paceEstimator.start(metres: route.metres, seconds: route.seconds, at: Date())
-        } else if !usingSimulatedWalk {
-            paceEstimator.observe(remainingMetres: route.metres, at: Date())
+            paceEstimator.start(seconds: route.seconds, at: Date())
+        }
+        if !usingSimulatedWalk, let fix = location.coordinate {
+            paceEstimator.observe(lat: fix.latitude, lon: fix.longitude, at: Date())
         }
     }
 
@@ -396,7 +425,11 @@ final class AppModel: ObservableObject {
     private func handleArrival() {
         if !usingSimulatedWalk, let timing = paceEstimator.arrive(at: Date()) {
             lastWalkTiming = timing
-            if let learned = paceEstimator.learned { UserDefaults.standard.set(learned, forKey: "learnedPace") }
+            if let learned = paceEstimator.learned {
+                UserDefaults.standard.set(learned, forKey: "learnedPace")
+                // Unless the walker picked a pace, the learned one is the pace from now on.
+                if UserDefaults.standard.object(forKey: "walkingPace") == nil { pace = learned }
+            }
         }
         walkStarted = false
         arrived = true
@@ -460,8 +493,9 @@ final class AppModel: ObservableObject {
 
     var scrubTimeText: String {
         var text = clock(scrubDate)
-        if let arrival = snapshot?.arrival, snapshot?.route != nil {
-            text = "Leave \(clock(scrubDate, zone: false)) → \(clock(arrival))"
+        if snapshot?.route != nil, let seconds = etaSeconds {
+            // The same arrival the ETA line shows (both rescaled by the measured pace).
+            text = "Leave \(clock(scrubDate, zone: false)) → \(clock(scrubDate.addingTimeInterval(seconds)))"
         }
         return text
     }

@@ -588,6 +588,95 @@ the owner has walked a few (PLAN Part 3 #9).
   over Cloudflare Pages' 25 MiB per-file limit (`build_places.py --dry-run` checks the
   limits). Fixed in D.
 
+## 13. The whole screen, at any zoom: score tiles and sun by block (2026-10-01)
+
+The owner's complaint: panning was laggy, and zoomed out only a square in the middle was
+painted ("Zoom in to see every street"). Both came from the same design — one box scored
+from scratch wherever the map stopped, capped at 2 km.
+
+- **Score on a fixed lattice, cache per tile and 15-minute slot.** Street-detail tiles are
+  1/8 of a metro tile (~500 m); a pan re-scores only the tiles that came into view, the
+  ring around the screen is scored in the background afterwards, and overlays are added and
+  removed per tile. Measured in the simulator (debug): first new tiles on screen **0.89 s**
+  after a 40 % drag including the 150 ms settle, the rest from the cache; before, every
+  stop re-scored ~9k edges (350 ms debug) and rebuilt all overlays.
+- **Past 2.5 km, sun by block.** Cells of 70 m … 4.4 km (36–72 across whatever the zoom),
+  coloured by the sunny share of the sidewalk metres sampled in them — the 12 longest edges
+  per cell, which is near length-weighted and deterministic (no flicker). Cost is bounded by
+  the sample, not the zoom: one NYC metro tile scores in **43 ms at 70 m cells (8k edges),
+  16 ms at 280 m, 5 ms at 1.1 km** (release, Mac; `lwtool blocks`).
+- **A metro is scored a tile at a time from the tile's own file.** A whole-city view can't
+  be stitched (60–70 tiles, 1M+ nodes), so each 4 km tile is loaded alone (5 ms) with only
+  its own buildings. The price is shadows that should cross a tile border: measured against
+  the stitched neighbourhood, mean |Δsun| per cell is **0.010 at 70 m cells (1.5 % of cells
+  change band, 0.03 within 300 m of the border), 0.012 at 280 m (1 %), 0.000 at 1.1 km**;
+  Seattle 0.002; NYC at a low December sun 0.001. Acceptable for a density view.
+- **MapKit's "900 m" is 2 km.** `setRegion(latitudinalMeters: 900)` reports a visible span
+  about twice that on a portrait phone, so the street/block threshold must be decided on
+  the *visible* box, not the margin-widened scoring box — the first cut put the default
+  zoom into blocks.
+- **A swipe in XCUITest is a fling** that throws the map a screen or more, so a "pan reuses
+  the cache" test must drag (`press(forDuration:thenDragTo:)`); the swipe version found
+  zero overlap and read as a cache bug.
+- **Several places per screen.** The Bay view has San Francisco and Berkeley; a field is
+  now scored from every place under the screen (metros and single bundles), most overlap
+  first. A side effect found on the way: "prefer the downloaded copy" in city selection
+  made a downloaded *other* city (Berkeley, from a test) outrank the shipped one that
+  covered the screen — overlap must come first, freshness only among copies of the same city.
+- Cells are drawn 3 % larger than they are: separate translucent polygons otherwise leave
+  hairline seams of bare map between them.
+
+## 14. What a second pair of eyes found in one day's code (2026-10-01)
+
+Three independent reviews of this round's code (route/service, catalog/store/cache,
+pipeline/Worker/CI), each verified against the code before fixing. Every test suite was
+green before the review; none of these had a test. The pattern is worth more than the list:
+**the bugs were in the seams between parts** — an actor and its awaits, a cache and the
+build it belongs to, a CI step and the platform it runs on — not in the algorithms.
+
+- **Actor reentrancy.** `CorridorService.update` took its scorer out of actor state as an
+  implicit lock and then awaited the weather fetch; a GPS fix arriving during the await
+  threw "Set a destination first" with a destination set, and (rarely) a tile-set change
+  during the await let the first call write the old graph's context back over the new
+  one. Fixed with a generation counter checked after every await and the scorer taken out
+  only around the synchronous scoring block. Rule: an actor method that suspends must
+  assume the world changed when it resumes.
+- **A cache keyed by file name, not build.** Parsed tiles and far terrain were cached as
+  `metro/file`; after a server rebuild while the app stayed open, the tiles the old stitch
+  had parsed would have been stitched with the new build's files — the one thing pinned
+  builds exist to prevent (and the UI test relaunched between builds, so it couldn't see
+  it). Keys now carry the build. Related: Pages tiles sat at build-less paths with
+  `immutable` caching, so a proxy or the phone's own URL cache could hand an old tile
+  under a new build's name; Pages now uses the same `metros/<id>/<buildKey>/` layout as S3.
+- **A ledger that trusted itself.** The eviction ledger was never reconciled with disk,
+  saved only every 8 touches, and never told when `markReady` deleted an old build — so
+  it could count 290 MB of ghosts and evict live files to pay for them. It now rebuilds
+  from a directory walk on load and saves after every stitch.
+- **Platform assumptions in CI.** `/usr/bin/time -l` is macOS-only: the cloud build would
+  have failed on every Linux run the moment the secrets were set. And a transient failure
+  in "pull the live site" was treated as "no site yet", which would have deployed a partial
+  site over the real one — the second time a *swallowed error* (`|| echo`) was the bug.
+  Pull now raises on anything but a 404 of the manifest, and publishing refuses to shrink
+  the metro list without `LW_ALLOW_REMOVALS`.
+- **Measurement that measures the wrong thing.** The pace estimator used "route length
+  shrank" as progress, which jumps whenever the slider or hysteresis picks another route
+  and starts the clock when the destination is set, not when the walker moves; a 90 s look
+  at the map taught it a 6 % slower pace for every later walk. It now accumulates distance
+  between real fixes and starts on the first move. In the fog POC, a METAR up to 50 min old
+  was ground truth for a scan, a late cron lost a scan and a log that began at 10 am
+  counted as a fog morning with a perfect burn-off score; and the latency clause of the
+  decision rule could not fail (bucket latency is 2–3 min by construction). All tightened
+  (20-min METAR window, 3-hour log window, mornings only with 9:15 coverage).
+- **Smaller:** YAML injection through a Nominatim city name written unquoted into
+  `metros.yaml` (quoted now); resumed downloads could splice two Geofabrik snapshots
+  (part file named by snapshot, md5 checked); launchd's PATH has no `npx`; the Worker's
+  Cache API is a no-op on `*.workers.dev` (KV now); a failed auto-build dispatch was never
+  retried; "partial coverage" was judged on the margin-widened box; `.noServer` was
+  unreachable while a city ships in the app; two arrival times on screen once the measured
+  pace kicked in; captions showed the kept route at λ = 0/1.
+- Open (BACKLOG): three Pareto searches per fix (~75 ms worst case on a phone); the
+  10 km cloud-top product makes "low vs mid" cloud a single pixel for ~16 cells.
+
 ## 7. Testing lessons that cost us
 
 - **Two UI tests passed for a week while testing nothing.** An

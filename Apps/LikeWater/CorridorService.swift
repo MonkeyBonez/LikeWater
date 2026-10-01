@@ -115,6 +115,10 @@ actor CorridorService {
     private var context: Context?
     private var lastRoute: Route?
     private var lastPrefer: RoutePreference = .sun
+    /// `update` suspends twice (city load, weather). The actor is reentrant at those
+    /// points, so a later call can overtake an earlier one; the earlier one must then
+    /// drop its result rather than write a stale (or other-graph) context back.
+    private var updateGeneration = 0
 
     /// PRD: arrival is within 20 m of the destination node.
     static let arrivalRadius: Double = 20
@@ -157,11 +161,12 @@ actor CorridorService {
     func update(user: CLLocationCoordinate2D, slack: Double,
                 layer: MapLayer, date: Date, pace: WalkingPace = .normal,
                 sunWeight: Double = 0.5, prefer: RoutePreference = .sun) async throws -> CorridorSnapshot {
+        updateGeneration += 1
+        let generation = updateGeneration
         try await prepare(for: user)
         try Task.checkCancellation()
-        guard let city, var scorer else { throw ServiceError.noDestination }
-        self.scorer = nil      // held locally while mutating, so its scratch isn't copied
-        defer { self.scorer = scorer }
+        guard generation == updateGeneration else { throw CancellationError() }
+        guard let city else { throw ServiceError.noDestination }
         let graph = city.bundle.graph
         guard let destinationCoordinate else { throw ServiceError.noDestination }
 
@@ -201,29 +206,34 @@ actor CorridorService {
         let t0 = CFAbsoluteTimeGetCurrent()
         let seconds = PaceModel(pace: pace).edgeSeconds(graph: graph, edges: corridor.edges,
                                                         terrain: city.bundle.buildings.terrain)
-        var sun: SolarPosition?
-        var sky: SkyCondition?
-        var timeline: SunTimeline?
-        if layer == .sun || sunWeight > 0 {
-            let p = Solar.position(latitude: user.latitude, longitude: user.longitude, date: date)
-            sun = p
-            // Same forecast Sun Map uses: under cloud the geometry is still right, but
-            // there is no beam to be in or out of, and the colours must say so.
-            let field: SkyField?
-            if let preset = WeatherService.launchPreset() {
-                field = WeatherService.field(for: preset, around: user, at: date)
-            } else {
-                field = await WeatherService.shared.sky(around: user, for: date)
-            }
-            try Task.checkCancellation()
-            sky = field?.condition(latitude: user.latitude, longitude: user.longitude,
-                                   at: date, sunElevation: p.elevation)
-            slotCache.drop(before: Int((date.timeIntervalSince1970 / 900).rounded(.down)) - 1)
-            timeline = SunTimelineBuilder.build(
-                graph: graph, corridor: corridor, origin: graph.coordinate(origin),
-                destination: graph.coordinate(destinationNode), departure: date, pace: pace,
-                edgeSeconds: seconds, scorer: &scorer, cache: slotCache, sky: field)
+        // The timeline is built on every layer: the route's sun %, the slider and the ETA
+        // are product readouts everywhere (PLAN "Route + ETA everywhere"), and after the
+        // first fix the slot cache makes it cheap.
+        let p = Solar.position(latitude: user.latitude, longitude: user.longitude, date: date)
+        let sun: SolarPosition? = p
+        // Same forecast Sun Map uses: under cloud the geometry is still right, but
+        // there is no beam to be in or out of, and the colours must say so.
+        let field: SkyField?
+        if let preset = WeatherService.launchPreset() {
+            field = WeatherService.field(for: preset, around: user, at: date)
+        } else {
+            field = await WeatherService.shared.sky(around: user, for: date)
         }
+        try Task.checkCancellation()
+        guard generation == updateGeneration, self.city === city else { throw CancellationError() }
+        let sky = field?.condition(latitude: user.latitude, longitude: user.longitude,
+                                   at: date, sunElevation: p.elevation)
+        // Keep every slot from now on: scrubbing the departure back and forth stays cached.
+        slotCache.drop(before: Int((min(date, Date()).timeIntervalSince1970 / 900).rounded(.down)) - 1)
+        // The scorer is taken out of the actor only around this synchronous block, so its
+        // scratch buffer is uniquely referenced (no copy) and no suspension can interleave.
+        var scorer = self.scorer ?? SunScorer(buildings: city.bundle.buildings)
+        self.scorer = nil
+        let timeline: SunTimeline? = SunTimelineBuilder.build(
+            graph: graph, corridor: corridor, origin: graph.coordinate(origin),
+            destination: graph.coordinate(destinationNode), departure: date, pace: pace,
+            edgeSeconds: seconds, scorer: &scorer, cache: slotCache, sky: field)
+        self.scorer = scorer
         let layerMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
 
         context = Context(corridor: corridor, labels: labels, origin: origin, timeline: timeline,
@@ -292,7 +302,8 @@ actor CorridorService {
             try? RouteEngine.route(graph: graph, corridor: ctx.corridor, labels: ctx.labels, origin: ctx.origin,
                                    timeline: ctx.timeline, edgeSeconds: ctx.seconds, sunWeight: w, prefer: prefer)
         }
-        guard var chosen = run(sunWeight) else { lastRoute = nil; return nil }
+        guard let fresh = run(sunWeight) else { lastRoute = nil; return nil }
+        var chosen = fresh
         var kept = false
         // Hysteresis: the walker is on the previous route and the rest of it is still
         // within 5 % of the new optimum — keep it, so the line doesn't flicker per fix.
@@ -310,8 +321,10 @@ actor CorridorService {
             kept = true
         }
         lastRoute = chosen; lastPrefer = prefer
-        let fastest = sunWeight == 0 ? chosen : (run(0) ?? chosen)
-        let sunniest = ctx.timeline == nil ? nil : (sunWeight == 1 ? chosen : run(1))
+        // The slider's end labels describe the optima, even when hysteresis kept a route
+        // a few per cent off them.
+        let fastest = sunWeight == 0 ? fresh : (run(0) ?? fresh)
+        let sunniest = ctx.timeline == nil ? nil : (sunWeight == 1 ? fresh : run(1))
         return view(of: chosen, fastest: fastest, sunniest: sunniest, timeline: ctx.timeline,
                     departure: ctx.departure, graph: graph, kept: kept)
     }

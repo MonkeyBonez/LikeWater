@@ -60,15 +60,18 @@ def lattice_step_lon(lat: float) -> float:
 
 
 def lattice_cells(box) -> list[tuple[float, float]]:
-    """Every lattice point inside the box, rounded like the app rounds them."""
+    """Every lattice point inside the box, rounded like the app rounds them. The longitude
+    step follows each row's own rounded latitude (as the app's does for the user's), so a
+    box straddling a half-degree still produces the cells the app asks for."""
     lat0, lon0, lat1, lon1 = box
-    d_lon = lattice_step_lon((lat0 + lat1) / 2)
     out = []
     i = math.ceil(lat0 / LATTICE_STEP_LAT)
     while i * LATTICE_STEP_LAT <= lat1:
+        lat = i * LATTICE_STEP_LAT
+        d_lon = lattice_step_lon(lat)
         j = math.ceil(lon0 / d_lon)
         while j * d_lon <= lon1:
-            out.append((round(i * LATTICE_STEP_LAT, 5), round(j * d_lon, 5)))
+            out.append((round(lat, 5), round(j * d_lon, 5)))
             j += 1
         i += 1
     return out

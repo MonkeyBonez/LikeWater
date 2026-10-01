@@ -16,6 +16,11 @@
     <string>--max-minutes</string><string>240</string>
     <string>--publish</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd's default PATH has no npx (publish.py needs it) and no Homebrew. -->
+    <key>PATH</key><string>/Users/snehal/.nvm/versions/node/v22.17.1/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>WorkingDirectory</key><string>/Users/snehal/Desktop/Software Projects/LikeWater/Pipeline</string>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>

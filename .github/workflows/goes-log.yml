@@ -39,7 +39,7 @@ jobs:
         run: pip install -q -r repo/Pipeline/requirements-goes.txt
       - name: Log the past hour's scans
         working-directory: repo/Pipeline
-        run: python goes_log.py --since-hours 1.5 --log-dir ../../log/goes_log
+        run: python goes_log.py --since-hours 3 --log-dir ../../log/goes_log   # 3 h: a run an hour late, or one skipped, still loses nothing
       - name: Running report
         working-directory: repo/Pipeline
         run: python goes_report.py --log-dir ../../log/goes_log --markdown ../../log/REPORT.md | tail -3

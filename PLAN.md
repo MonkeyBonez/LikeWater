@@ -277,7 +277,9 @@ different data); Pages is a global CDN. First non-US candidate if ever: Toronto 
 Deviations: the Worker lives in `Worker/` (`Server/` is gitignored); `PaceEstimator` is in
 the engine (unit-testable); pace seconds are per direction (slope); crossings are not
 discounted for sun (LEARNINGS §11.2); the hysteresis/route walk test uses `stepButton`
-following the route.
+following the route; the A5 metro test is `testNewYorkTimeAwareRouteFindsMoreSun` (Times Sq →
+Union Sq at 1 pm, the biggest measured effect, LEARNINGS §11.1) rather than the planned
+December-sunset case; the timeline is built on every layer, not only when `sunWeight > 0`.
 
 ## Part 2 — What to build
 
@@ -566,7 +568,8 @@ Like Water: `testDestinationInAnUnbuiltPlaceShowsTheBanner`. Existing `MetroUITe
 
 - `Pipeline/publish.py`: `--target pages` runs `wrangler pages deploy Server/ --project-name
   likewater-tiles` (free, `*.pages.dev`; a `_headers` file sets `max-age=300` for
-  `manifest.json` and `*/metro.json`, tiles keep Pages' default immutable caching);
+  `manifest.json` and `*/metro.json`; tiles are under `metros/<id>/<buildKey>/` on Pages
+  too, so they can be cached for a year — Pages' own default is `must-revalidate`);
   `--target s3` uploads to any S3-compatible bucket (R2 or AWS) under
   `metros/<id>/<buildKey>/…` with explicit `Cache-Control`; writes the manifest last;
   `--dry-run` lists what it would do; credentials from the environment only.

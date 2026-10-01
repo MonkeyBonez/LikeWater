@@ -94,19 +94,22 @@ final class BuildPinningUITests: XCTestCase {
     /// screen or so needs no download.
     func testPrefetchedTilesMakeAPanFree() throws {
         try XCTSkipUnless(reachable(8765), "needs the server on 8765")
-        let first = open(port: 8765, fresh: true, expecting: "Seattle (")
-        let firstTiles = first.components(separatedBy: " tiles")[0]
+        open(port: 8765, fresh: true, expecting: "Seattle (")
+        func stitch() -> String { (stats.value as? String ?? "").components(separatedBy: "stitch ").last ?? "" }
+        let firstStitch = stitch()
         sleep(10)                                 // let the background ring finish
-        // Pan ~2 km north, out of the stitch's valid box, so a new stitch is needed.
-        for _ in 0..<3 { app.maps.firstMatch.swipeDown(); usleep(600_000) }
-        let deadline = Date().addingTimeInterval(40)
+        // Pan north until the stitch changes (a few km): its tiles must already be here.
         var label = stats.label
-        while Date() < deadline {
-            label = stats.label
-            if label.components(separatedBy: " tiles")[0] != firstTiles || !label.contains("downloaded") { break }
-            usleep(400_000)
+        for _ in 0..<8 where stitch() == firstStitch {
+            app.maps.firstMatch.swipeDown()
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                label = stats.label
+                if stitch() != firstStitch && !label.contains("scoring") { break }
+                usleep(300_000)
+            }
         }
-        XCTAssertNotEqual(label.components(separatedBy: " tiles")[0], firstTiles, "the pan should have needed a new stitch: \(label)")
+        XCTAssertNotEqual(stitch(), firstStitch, "the pan should have needed a new stitch: \(label)")
         shoot("prefetch-pan")
         XCTAssertFalse(label.contains("downloaded"), "the pan should have found its tiles prefetched: \(label)")
     }

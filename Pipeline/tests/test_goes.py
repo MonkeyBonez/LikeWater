@@ -54,16 +54,24 @@ def test_scan_angles_hit_the_projection_origin():
 
 def test_report_prefers_the_source_that_matches_the_metar():
     import goes_report as rep
-    def rec(hour_utc, goes_beam, om_beam, sfo):
+    def rec(hour_utc, goes_beam, om_beam, sfo, minute=0, obs_minutes_off=0):
         cell = [37.62, -122.37777]
-        return {"scan_end": f"2026-09-16T{hour_utc:02d}:00:00+00:00", "latency_s": 120,
+        return {"scan_end": f"2026-09-16T{hour_utc:02d}:{minute:02d}:00+00:00", "latency_s": 120,
+                "logged": f"2026-09-16T{hour_utc + 1:02d}:{minute:02d}:00+00:00",
                 "stations": {"KSFO": cell},
-                "metar": {"KSFO": {"layers": [{"amount": sfo, "base_m": 300}]}},
+                "metar": {"KSFO": {"time": f"2026-09-16T{hour_utc:02d}:{minute + obs_minutes_off:02d}:00+00:00",
+                                   "layers": [{"amount": sfo, "base_m": 300}]}},
                 "cells": [{"lat": cell[0], "lon": cell[1], "goes": {"beam": goes_beam},
                            "om": {"beam": om_beam}}]}
     # 9 am PDT: fog (GOES right), 10 am: burnt off, GOES sees it, the forecast doesn't.
     s = rep.score([rec(16, 0.0, 0.9, "OVC"), rec(17, 1.0, 0.1, "FEW"), rec(18, 1.0, 1.0, "FEW")])
     assert s["station_disagreements"] == 2 and s["goes_right_share"] == 1.0
-    assert s["median_latency_min"] == 2.0
+    assert s["median_latency_min"] == 2.0 and s["median_delivery_min"] == 60.0
     assert s["fog_mornings"] == 1 and s["burnoff_error_min"]["goes"] == 0
     assert s["decision"] == "build the GOES job"
+    # A METAR 40 min from the scan is not ground truth for it.
+    s2 = rep.score([rec(16, 0.0, 0.9, "OVC", obs_minutes_off=40)])
+    assert s2["station_disagreements"] == 0
+    # A log that only starts at 10 am cannot claim a fog morning.
+    s3 = rep.score([rec(17, 1.0, 0.1, "FEW"), rec(18, 1.0, 1.0, "FEW")])
+    assert s3["fog_mornings"] == 0

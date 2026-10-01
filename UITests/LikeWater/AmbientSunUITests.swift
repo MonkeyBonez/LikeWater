@@ -132,4 +132,23 @@ final class AmbientSunUITests: XCTestCase {
         shoot("ambient-40-starts-at-user")
         XCTAssertTrue((stats.value as? String ?? "").hasPrefix("37.75"), "not at the user: \(stats.value ?? "")")
     }
+
+    /// Zoomed out, the no-walk map shows sun by block over everything on screen with data,
+    /// instead of a scored square in the middle.
+    func testZoomedOutShowsSunByBlock() throws {
+        app = XCUIApplication()
+        app.launchArguments = ["-uiTestStart", "37.78415,-122.40060", "-uiTestDate", "2026-09-23T20:00:00Z", "-uiTestSky", "clear"]
+        app.launch()
+        XCTAssertTrue(waitForStats(containing: "San Francisco"))
+        let title = app.staticTexts["ambientTitle"]
+        XCTAssertEqual(title.label, "Sun around here")
+        app.maps.firstMatch.pinch(withScale: 0.25, velocity: -1.5)
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline, !(stats.exists && stats.label.contains("blocks") && !stats.label.contains("scoring")) { usleep(300_000) }
+        shoot("ambient-20-sun-by-block")
+        XCTAssertTrue(stats.label.contains("blocks"), stats.label)
+        XCTAssertTrue(title.label.hasPrefix("Sun by block"), title.label)
+        let blocks = Int(stats.label.components(separatedBy: " blocks")[0].split(separator: " ").last?.replacingOccurrences(of: ",", with: "") ?? "") ?? 0
+        XCTAssertGreaterThan(blocks, 300, stats.label)
+    }
 }

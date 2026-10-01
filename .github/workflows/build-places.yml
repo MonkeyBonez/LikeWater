@@ -48,8 +48,9 @@ jobs:
           .venv/bin/pip install -q -r requirements.txt
       - name: Pull the live site
         working-directory: Pipeline
-        # The first run has no live site yet; then Server/ starts empty and builds from metros.yaml.
-        run: .venv/bin/python publish.py --pull "${{ vars.LW_BUNDLE_BASE_URL }}" || echo "no live site yet"
+        # A 404 on the manifest means no site yet (Server/ starts empty); any other failure
+        # fails the job, so a half-pulled Server/ is never published over the real site.
+        run: .venv/bin/python publish.py --pull "${{ vars.LW_BUNDLE_BASE_URL }}"
       - name: Build
         working-directory: Pipeline
         env:
@@ -78,6 +79,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           LW_PAGES_PROJECT: ${{ vars.LW_PAGES_PROJECT }}
+          LW_BUNDLE_BASE_URL: ${{ vars.LW_BUNDLE_BASE_URL }}   # the no-shrink guard compares against the live site
         run: .venv/bin/python publish.py --target pages
       - uses: actions/upload-artifact@v4
         if: always()

@@ -136,16 +136,36 @@ struct SunMapScreen: View {
             }
 
             if let field = model.field {
-                Text("\(field.city)\(field.tiles > 0 ? " (\(field.tiles) tiles\(field.downloaded > 0 ? ", \(field.downloaded) downloaded" : ""))" : "") · \(field.scoredEdges) edges scored in \(String(format: "%.0f", field.computeMs)) ms · \(field.sunnyCount) sunny / \(field.mixedCount) mixed / \(field.shadedCount) shaded · sky \(String(format: "%.2f", model.beamStrength)) \(field.skySource)\(field.built.map { " · build " + MetroIndex.buildKey($0) } ?? "") · cache \(field.cacheBytes / 1_000_000) MB")
+                Text(Self.statsLine(field, beam: model.beamStrength))
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("sunStats")
-                    .accessibilityValue(String(format: "%.4f,%.4f", field.center.latitude, field.center.longitude))
+                    .accessibilityValue(String(format: "%.4f,%.4f · stitch %@", field.center.latitude, field.center.longitude, field.stitchID))
             }
         }
         .padding(16)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
         .padding(10)
+    }
+
+    /// One line the UI tests read: what was scored, how, from where.
+    static func statsLine(_ field: SunField, beam: Double) -> String {
+        let f = NumberFormatter(); f.numberStyle = .decimal
+        let n = { (v: Int) in f.string(from: NSNumber(value: v)) ?? "\(v)" }
+        var where_ = field.city
+        if field.stitchedTiles > 0 {
+            where_ += " (\(field.stitchedTiles) tiles\(field.downloaded > 0 ? ", \(field.downloaded) downloaded" : ""))"
+        }
+        let how = field.detail.isBlocks
+            ? "\(n(field.cellCount)) blocks from \(n(field.scoredEdges)) edges scored"
+            : "\(n(field.scoredEdges)) edges scored"
+        var line = "\(where_) · \(how) in \(String(format: "%.0f", field.computeMs)) ms"
+        line += " (\(field.tiles.count) score tiles, \(field.cachedTiles) cached\(field.inProgress ? ", scoring…" : ""))"
+        line += " · \(n(field.sunnyCount)) sunny / \(n(field.mixedCount)) mixed / \(n(field.shadedCount)) shaded"
+        line += " · sky \(String(format: "%.2f", beam)) \(field.skySource)"
+        if let b = field.built { line += " · build " + MetroIndex.buildKey(b) }
+        line += " · cache \(field.cacheBytes / 1_000_000) MB"
+        return line
     }
 
     private var skyIcon: String {

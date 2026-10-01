@@ -68,10 +68,19 @@ actor CityStore {
     /// and two loads racing on one file used to fail the second.
     private var fileDownloads: [String: Task<Void, Error>] = [:]
 
-    private func download(_ source: URL, to destination: URL) async throws {
+    /// A session that stays off cellular and low-data connections, for anything not asked for.
+    private static let unexpensiveSession: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.allowsExpensiveNetworkAccess = false
+        c.allowsConstrainedNetworkAccess = false
+        return URLSession(configuration: c)
+    }()
+
+    func download(_ source: URL, to destination: URL, expensive: Bool = true) async throws {
         let key = destination.path
         if let running = fileDownloads[key] { return try await running.value }
-        let task = Task<Void, Error> { try await CityCatalog.fetch(source, to: destination) }
+        let session = expensive ? URLSession.shared : Self.unexpensiveSession
+        let task = Task<Void, Error> { try await CityCatalog.fetch(source, to: destination, session: session) }
         fileDownloads[key] = task
         defer { fileDownloads[key] = nil }
         try await task.value
@@ -109,9 +118,18 @@ actor CityStore {
             do {
                 return try await loadMetro(m, around: points)
             } catch let error as CityCatalogError {
-                // A newer build that can't be fetched (offline): keep serving the old one.
-                guard case .downloadFailed = error, let older = m.fallback else { throw error }
-                return try await loadMetro(older, around: points)
+                switch error {
+                case .downloadFailed where m.fallback != nil:
+                    // A newer build that can't be fetched (offline): keep serving the old one.
+                    return try await loadMetro(m.fallback!, around: points)
+                case .noCoverage, .walkTooLong:
+                    // The metro has no tiles here (or the walk spans too many): a shipped
+                    // single city covering the box still can.
+                    if let single { return try await load(single) }
+                    throw error
+                default:
+                    throw error
+                }
             } catch let error as URLError {
                 guard let older = m.fallback else { throw error }
                 return try await loadMetro(older, around: points)
@@ -147,7 +165,7 @@ actor CityStore {
 
     // MARK: - Single-file cities
 
-    private func load(_ descriptor: CityDescriptor) async throws -> LoadedCity {
+    func load(_ descriptor: CityDescriptor) async throws -> LoadedCity {
         if let hit = singles[descriptor.id] { return hit }
         if let task = inFlight[descriptor.id] { return try await task.value }
         let task = Task<LoadedCity, Error> {
@@ -197,8 +215,9 @@ actor CityStore {
         defer { inFlight[key] = nil }
         let city = try await task.value
         metro = city
-        await CityCatalog.shared.markReady(metro: m.id, directory: m.localDirectory)
+        if await CityCatalog.shared.markReady(metro: m.id, directory: m.localDirectory) { forgetMissingFiles() }
         evictIfNeeded()
+        saveLedger()
         prefetchRing(m, around: wanted)
         return city
     }
@@ -280,8 +299,10 @@ actor CityStore {
                           downloaded: missing.count, extent: m.index.bbox, built: m.index.built)
     }
 
+    /// Parsed tiles are keyed by build as well as file: after a rebuild the same file name
+    /// holds a different graph, and a stitch must never mix two builds' node ids.
     private func rawTile(_ m: MetroDescriptor, _ t: MetroIndex.Tile) throws -> RawBundle {
-        let key = m.id + "/" + t.file
+        let key = m.id + "@" + m.buildKey + "/" + t.file
         if let hit = tileCache[key] {
             tileOrder.removeAll { $0 == key }; tileOrder.append(key)
             return hit
@@ -295,11 +316,17 @@ actor CityStore {
         return raw
     }
 
+    /// The metro's coarse far-field terrain; nil when the metro has none or the file is not
+    /// on the phone (hills beyond the tiles then cast no shadow — a degraded field, not an error).
     private func farTerrain(_ m: MetroDescriptor) throws -> TerrainGrid? {
-        if let hit = farCache[m.id] { return hit }
+        let key = m.id + "@" + m.buildKey
+        if let hit = farCache[key] { return hit }
         guard let far = m.index.far else { return nil }
-        let grid = try RawBundle(contentsOf: m.localDirectory.appendingPathComponent(far.file)).terrain
-        farCache[m.id] = grid
+        let url = m.localDirectory.appendingPathComponent(far.file)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let grid = try RawBundle(contentsOf: url).terrain
+        touch(url)
+        farCache[key] = grid
         return grid
     }
 
@@ -324,20 +351,31 @@ actor CityStore {
         return path.hasPrefix(base) ? String(path.dropFirst(base.count + 1)) : path
     }
 
-    /// The ledger, built from a scan of Cities/ the first time (files already there —
-    /// sideloaded or from an older app version — count by their modification time).
+    /// The ledger, reconciled with what is really under Cities/ every time it is first
+    /// read in a session: files on disk it doesn't know (sideloads, an older app version,
+    /// a download the app was killed after) are added by their modification time, and
+    /// entries whose file is gone (`markReady` deleted an old build) are dropped — so the
+    /// cap counts real bytes, never ghosts.
     private func loadLedger() -> [String: CacheEntry] {
         if let ledger { return ledger }
-        var out: [String: CacheEntry] = [:]
+        var known: [String: CacheEntry] = [:]
         if let data = try? Data(contentsOf: Self.ledgerURL),
            let entries = try? JSONDecoder().decode([CacheEntry].self, from: data) {
-            for e in entries { out[e.key] = e }
-        } else if let walker = FileManager.default.enumerator(at: CityCatalog.downloadsDirectory,
-                                                              includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) {
+            for e in entries { known[e.key] = e }
+        }
+        var out: [String: CacheEntry] = [:]
+        if let walker = FileManager.default.enumerator(at: CityCatalog.downloadsDirectory,
+                                                       includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) {
             for case let url as URL in walker where url.pathExtension == "lwbundle" {
+                let key = relative(url)
                 let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                out[relative(url)] = CacheEntry(key: relative(url), bytes: v?.fileSize ?? 0,
-                                                lastUsed: v?.contentModificationDate ?? .distantPast)
+                let bytes = v?.fileSize ?? 0
+                if let e = known[key], e.bytes == bytes {
+                    out[key] = e
+                } else {
+                    out[key] = CacheEntry(key: key, bytes: bytes,
+                                          lastUsed: known[key]?.lastUsed ?? v?.contentModificationDate ?? .distantPast)
+                }
             }
         }
         ledger = out
@@ -347,6 +385,17 @@ actor CityStore {
     private func saveLedger() {
         guard let ledger, let data = try? JSONEncoder().encode(Array(ledger.values)) else { return }
         try? data.write(to: Self.ledgerURL, options: .atomic)
+        ledgerDirty = 0
+    }
+
+    /// Drops ledger entries whose files are gone (after `markReady` removed an old build).
+    func forgetMissingFiles() {
+        var l = loadLedger()
+        for key in l.keys where !FileManager.default.fileExists(atPath: CityCatalog.downloadsDirectory.appendingPathComponent(key).path) {
+            l[key] = nil
+        }
+        ledger = l
+        saveLedger()
     }
 
     /// Records a use of a file under Cities/ (bundled files are ignored).
@@ -354,11 +403,11 @@ actor CityStore {
         guard url.standardizedFileURL.path.hasPrefix(CityCatalog.downloadsDirectory.standardizedFileURL.path) else { return }
         var l = loadLedger()
         let key = relative(url)
-        let bytes = l[key]?.bytes ?? ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        var bytes = l[key]?.bytes ?? 0
+        if bytes == 0 { bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
         l[key] = CacheEntry(key: key, bytes: bytes, lastUsed: Date())
         ledger = l
         ledgerDirty += 1
-        if ledgerDirty >= 8 { saveLedger(); ledgerDirty = 0 }
     }
 
     /// Total bytes the ledger knows about (debug, tests).
@@ -372,8 +421,9 @@ actor CityStore {
         var protected = Set<String>()
         if let metro, let id = metro.metroID {
             for t in metro.tiles { protected.formUnion(l.keys.filter { $0.hasPrefix(id + "/") && $0.hasSuffix("t_\(t).lwbundle") }) }
-            protected.formUnion(l.keys.filter { $0.hasPrefix(id + "/") && $0.hasSuffix("far.lwbundle") })
         }
+        // Far-field terrain is small (~1 MB) and every stitch of its metro needs it.
+        protected.formUnion(l.keys.filter { $0.hasSuffix("far.lwbundle") })
         for single in singles.values { protected.insert(single.id) }
         for path in fileDownloads.keys { protected.insert(relative(URL(fileURLWithPath: path))) }
         let gone = CachePolicy.evictions(Array(l.values), capBytes: Self.capBytes, protected: protected)
@@ -381,6 +431,7 @@ actor CityStore {
             try? FileManager.default.removeItem(at: CityCatalog.downloadsDirectory.appendingPathComponent(key))
             l[key] = nil
             for (k, _) in tileCache where k.hasSuffix("/" + (key as NSString).lastPathComponent) { tileCache[k] = nil }
+            tileOrder.removeAll { !tileCache.keys.contains($0) }
         }
         ledger = l
         if !gone.isEmpty { saveLedger(); Task { await CityCatalog.shared.invalidate() } }
@@ -400,18 +451,13 @@ actor CityStore {
         guard !missing.isEmpty else { return }
         prefetchTask?.cancel()
         prefetchTask = Task.detached(priority: .background) {
-            let config = URLSessionConfiguration.default
-            config.allowsExpensiveNetworkAccess = false
-            config.allowsConstrainedNetworkAccess = false
-            let session = URLSession(configuration: config)
             var got = 0
             for t in missing {
                 if Task.isCancelled { break }
                 let dest = m.localDirectory.appendingPathComponent(t.file)
-                guard let (tmp, response) = try? await session.download(from: remote.appendingPathComponent(t.file)),
-                      (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
-                try? fm.removeItem(at: dest)
-                if (try? fm.moveItem(at: tmp, to: dest)) != nil {
+                // The same deduped download a stitch uses, on the Wi-Fi-only session: a
+                // stitch that wants this tile meanwhile joins it instead of fetching twice.
+                if (try? await CityStore.shared.download(remote.appendingPathComponent(t.file), to: dest, expensive: false)) != nil {
                     got += 1
                     await CityStore.shared.touch(dest)
                 }
@@ -424,6 +470,37 @@ actor CityStore {
         prefetched = n
         saveLedger()
         evictIfNeeded()
+    }
+
+    /// One metro tile as a bundle of its own (its graph, buildings and the far terrain), for
+    /// scoring a zoomed-out view a file at a time. Not kept: the caller keeps its results.
+    /// `bundle` is nil when the tile isn't on the phone and `download` is false (or the
+    /// fetch, Wi-Fi only, failed); `downloaded` says whether this call fetched it.
+    func tileBundle(_ m: MetroDescriptor, _ t: MetroIndex.Tile, download allowDownload: Bool) async throws -> (bundle: CityBundle?, downloaded: Bool) {
+        let url = m.localDirectory.appendingPathComponent(t.file)
+        var fetched = false
+        if !FileManager.default.fileExists(atPath: url.path) {
+            guard allowDownload, let remote = m.remoteDirectory else { return (nil, false) }
+            try? FileManager.default.createDirectory(at: m.localDirectory, withIntermediateDirectories: true)
+            do {
+                try await download(remote.appendingPathComponent(t.file), to: url, expensive: false)
+                fetched = true
+            } catch {
+                return (nil, false)
+            }
+        }
+        if let far = m.index.far, let remote = m.remoteDirectory, allowDownload {
+            let farURL = m.localDirectory.appendingPathComponent(far.file)
+            if !FileManager.default.fileExists(atPath: farURL.path) {
+                try? await download(remote.appendingPathComponent(far.file), to: farURL, expensive: false)
+            }
+        }
+        let raw: RawBundle
+        if let hit = tileCache[m.id + "@" + m.buildKey + "/" + t.file] { raw = hit } else { raw = try RawBundle(contentsOf: url) }
+        touch(url)
+        if fetched { saveLedger() }
+        let far = try farTerrain(m)
+        return (try TileStitcher.stitch([raw], farTerrain: far), fetched)
     }
 
     func stats(for city: LoadedCity) -> (nodes: Int, edges: Int, buildings: Int, tiles: Int, loadMs: Double) {

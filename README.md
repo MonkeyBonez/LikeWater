@@ -120,6 +120,18 @@ in `cache/build_log.jsonl`); `--cell LAT,LON` turns a requested cell into an ent
 US only) and builds it; `requests_to_places.py` turns the Worker's export into entries to
 review. Portland was the first: 6.9 min, 2.35 GB peak, 39 tiles, 70 MB.
 
+## The sun field: score tiles and blocks
+
+The no-walk sun view (Sun Map, and Like Water before a destination) is scored on a fixed
+lattice (`SunLattice`, the metro tile grid and subdivisions), tile by tile, through a cache
+keyed by place build, tile and 15-minute slot: a pan scores only what came into view and
+the ring around the screen is scored ahead in the background; overlays are diffed per tile.
+Up to 2.5 km across the screen it is every sidewalk edge; beyond, **sun by block** —
+cells of 70 m to 4.4 km (36–72 across) coloured by the sunny share of the 12 longest edges
+per cell, each metro tile scored alone from its own file so a whole city fits in memory
+(LEARNINGS §13 has the seam error). `lwtool blocks --metro Server/nyc --center LAT,LON
+--at ISO --level 2` measures one tile and compares tile-alone with the stitched neighbourhood.
+
 ## Coverage, builds and eviction
 
 - **Which place**: the box spanned by the screen's corners (or a walk's two ends) picks the

@@ -143,7 +143,7 @@ struct ContentView: View {
         if model.snapshot == nil, model.destination == nil, let field = model.ambient {
             VStack(alignment: .leading, spacing: 10) {
                 Text(!field.sun.isUp ? "Sun is down around here"
-                     : model.ambientClipped ? "Zoom in to see every street" : "Sun around here")
+                     : field.detail.isBlocks ? "Sun by block · zoom in for streets" : "Sun around here")
                     .font(.headline)
                     .accessibilityIdentifier("ambientTitle")
                 sunScrubber
@@ -155,7 +155,7 @@ struct ContentView: View {
                     }
                 }
                 .font(.caption2).foregroundStyle(.secondary)
-                Text("\(field.city)\(field.tiles > 0 ? " (\(field.tiles) tiles)" : "") · \(field.scoredEdges) edges · \(field.sunnyCount) sunny / \(field.mixedCount) mixed / \(field.shadedCount) shaded")
+                Text("\(field.city)\(field.stitchedTiles > 0 ? " (\(field.stitchedTiles) tiles)" : "") · \(field.detail.isBlocks ? "\(field.cellCount) blocks from " : "")\(field.scoredEdges) edges · \(field.tiles.count) score tiles, \(field.cachedTiles) cached\(field.inProgress ? ", scoring…" : "") · \(field.sunnyCount) sunny / \(field.mixedCount) mixed / \(field.shadedCount) shaded")
                     .font(.caption2.monospaced()).foregroundStyle(.secondary)
                     .accessibilityIdentifier("ambientStats")
                     .accessibilityValue(String(format: "%.4f,%.4f", field.center.latitude, field.center.longitude))

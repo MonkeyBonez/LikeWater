@@ -29,8 +29,10 @@ def test_build_args_carry_every_place_and_options():
     assert args[args.index("--min-component") + 1] == "500"
 
 
-def test_peak_ram_is_read_from_time_l():
+def test_peak_ram_is_read_from_time_l_and_gnu_time_v():
     assert bp.peak_rss_gb("  5312409600  maximum resident set size\n") == 5.31
+    assert bp.peak_rss_gb("\tMaximum resident set size (kbytes): 5312409\n") == 5.31
+    assert bp.peak_rss_gb("nothing") is None
 
 
 def test_requests_become_us_proposals_merged_per_city():
@@ -67,3 +69,7 @@ def test_a_requested_cell_becomes_one_entry_and_foreign_cells_are_refused(tmp_pa
     data = yaml.safe_load(f.read_text())
     assert [m["id"] for m in data["metros"]] == ["a", "denver"]
     assert f.read_text().startswith("# header comment")
+    # A city name Nominatim could return must not break the file (YAML specials).
+    hostile = dict(entry, id="x", name="Foo: Bar [Town] # Two 'quoted'")
+    bp.append_entry(hostile, f)
+    assert yaml.safe_load(f.read_text())["metros"][-1]["name"] == "Foo: Bar [Town] # Two 'quoted'"
