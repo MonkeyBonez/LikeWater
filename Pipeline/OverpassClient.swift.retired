@@ -1,0 +1,130 @@
+import Foundation
+
+enum OverpassError: Error, LocalizedError {
+    case badResponse(Int)
+    case emptyArea
+    case network(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .badResponse(let code): return "Map server returned \(code). Try again in a moment."
+        case .emptyArea: return "No walkable streets found in this area."
+        case .network(let m): return "Network problem: \(m)"
+        }
+    }
+}
+
+/// Downloads the OSM pedestrian graph for a bounding box and caches the raw JSON on disk.
+struct OverpassClient {
+    static let endpoints = [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+    ]
+    /// Public Overpass instances are slow when loaded and rate-limit hard, so each mirror
+    /// gets a second attempt after a short backoff before moving on.
+    static let attemptsPerEndpoint = 2
+    static let requestTimeout: TimeInterval = 110
+
+    /// Highways a pedestrian may use. Motorways / trunk roads and anything explicitly
+    /// foot-forbidden are excluded.
+    static func query(_ b: BBox) -> String {
+        let bbox = "\(b.minLat),\(b.minLon),\(b.maxLat),\(b.maxLon)"
+        return """
+        [out:json][timeout:60];
+        (
+          way["highway"]["highway"!~"^(motorway|motorway_link|trunk|trunk_link|construction|proposed|raceway|bus_guideway|escape)$"]["foot"!~"^(no|private)$"]["access"!~"^(private|no)$"](\(bbox));
+        );
+        out body;
+        >;
+        out skel qt;
+        """
+    }
+
+    static var cacheDirectory: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("overpass", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    static func fetchGraph(bbox: BBox) async throws -> PedestrianGraph {
+        let cacheURL = cacheDirectory.appendingPathComponent("\(bbox.cacheKey).json")
+        if let data = try? Data(contentsOf: cacheURL), !data.isEmpty {
+            if let graph = try? parse(data: data, bbox: bbox), graph.edgeCount > 0 {
+                return graph
+            }
+        }
+        let data = try await download(bbox: bbox)
+        try? data.write(to: cacheURL)
+        let graph = try parse(data: data, bbox: bbox)
+        guard graph.edgeCount > 0 else { throw OverpassError.emptyArea }
+        return graph
+    }
+
+    private static func download(bbox: BBox) async throws -> Data {
+        var lastError: Error = OverpassError.network("no endpoint")
+        for (index, endpoint) in endpoints.enumerated() {
+          for attempt in 0..<attemptsPerEndpoint {
+            if index > 0 || attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_500_000_000)
+            }
+            do {
+                var request = URLRequest(url: URL(string: endpoint)!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = requestTimeout
+                request.setValue("LikeWater/0.1 (walking corridor app)", forHTTPHeaderField: "User-Agent")
+                request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                var body = URLComponents()
+                body.queryItems = [URLQueryItem(name: "data", value: query(bbox))]
+                request.httpBody = body.percentEncodedQuery?.data(using: .utf8)
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw OverpassError.network("no response") }
+                guard http.statusCode == 200 else { throw OverpassError.badResponse(http.statusCode) }
+                guard !data.isEmpty else { throw OverpassError.emptyArea }
+                return data
+            } catch {
+                lastError = error
+            }
+          }
+        }
+        throw lastError
+    }
+
+    /// Hand-rolled extraction from the Overpass JSON: elements are heterogeneous and the
+    /// payload can be several MB, so this walks the parsed object graph directly.
+    static func parse(data: Data, bbox: BBox) throws -> PedestrianGraph {
+        let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let elements = root?["elements"] as? [[String: Any]] ?? []
+
+        var nodes = [Int64: (lat: Double, lon: Double)](minimumCapacity: elements.count)
+        var ways: [RawWay] = []
+        ways.reserveCapacity(elements.count / 4 + 1)
+
+        for element in elements {
+            guard let type = element["type"] as? String else { continue }
+            if type == "node" {
+                guard let id = element["id"] as? Int64 ?? (element["id"] as? Int).map(Int64.init),
+                      let lat = element["lat"] as? Double,
+                      let lon = element["lon"] as? Double else { continue }
+                nodes[id] = (lat, lon)
+            } else if type == "way" {
+                guard let refs = element["nodes"] as? [Int64] ?? (element["nodes"] as? [Int]).map({ $0.map(Int64.init) }),
+                      refs.count >= 2 else { continue }
+                let tags = element["tags"] as? [String: String] ?? [:]
+                ways.append(RawWay(nodeIDs: refs, isCrossing: isCrossing(tags)))
+            }
+        }
+        return GraphBuilder.build(nodes: nodes, ways: ways, bbox: bbox)
+    }
+
+    static func isCrossing(_ tags: [String: String]) -> Bool {
+        if tags["footway"] == "crossing" { return true }
+        if tags["highway"] == "crossing" { return true }
+        if tags["path"] == "crossing" { return true }
+        if tags["cycleway"] == "crossing" { return true }
+        if tags["crossing"] != nil { return true }
+        return false
+    }
+}

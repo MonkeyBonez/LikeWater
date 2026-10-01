@@ -1,0 +1,322 @@
+[
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-03-20T19:00:00Z",
+  "elevation": 48.33977,
+  "azimuth": 150.262054
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-03-20T12:00:00Z",
+  "elevation": -26.468064,
+  "azimuth": 67.37531
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-06-21T20:00:00Z",
+  "elevation": 75.453853,
+  "azimuth": 169.382239
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-06-21T13:30:00Z",
+  "elevation": 6.617824,
+  "azimuth": 65.272156
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-09-23T17:00:00Z",
+  "elevation": 33.468276,
+  "azimuth": 121.27405
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-09-23T23:45:00Z",
+  "elevation": 26.160872,
+  "azimuth": 247.071613
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-12-21T20:00:00Z",
+  "elevation": 28.787744,
+  "azimuth": 177.931057
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-12-21T00:10:00Z",
+  "elevation": 6.566672,
+  "azimuth": 233.574102
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-12-04T00:00:00Z",
+  "elevation": 7.779765,
+  "azimuth": 234.070109
+ },
+ {
+  "site": "San Francisco",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "utc": "2026-07-15T02:30:00Z",
+  "elevation": 10.387587,
+  "azimuth": 289.33768
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-03-20T19:00:00Z",
+  "elevation": 4.069899,
+  "azimuth": 262.117102
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-03-20T12:00:00Z",
+  "elevation": 23.506024,
+  "azimuth": 153.897942
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-06-21T20:00:00Z",
+  "elevation": 17.814774,
+  "azimuth": 287.251731
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-06-21T13:30:00Z",
+  "elevation": 49.304062,
+  "azimuth": 180.140204
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-09-23T17:00:00Z",
+  "elevation": 14.297981,
+  "azimuth": 237.662948
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-09-23T23:45:00Z",
+  "elevation": -23.904582,
+  "azimuth": 333.871294
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-12-21T20:00:00Z",
+  "elevation": -24.652344,
+  "azimuth": 266.7577
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-12-21T00:10:00Z",
+  "elevation": -47.429961,
+  "azimuth": 333.943409
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-12-04T00:00:00Z",
+  "elevation": -46.124062,
+  "azimuth": 333.609052
+ },
+ {
+  "site": "Reykjavik",
+  "lat": 64.1466,
+  "lon": -21.9426,
+  "utc": "2026-07-15T02:30:00Z",
+  "elevation": -3.622336,
+  "azimuth": 13.091065
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-03-20T19:00:00Z",
+  "elevation": -62.983893,
+  "azimuth": 87.192812
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-03-20T12:00:00Z",
+  "elevation": -11.960817,
+  "azimuth": 270.239973
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-06-21T20:00:00Z",
+  "elevation": -41.121836,
+  "azimuth": 56.720162
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-06-21T13:30:00Z",
+  "elevation": -31.87009,
+  "azimuth": 298.891538
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-09-23T17:00:00Z",
+  "elevation": -88.689757,
+  "azimuth": 34.656903
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-09-23T23:45:00Z",
+  "elevation": 12.080176,
+  "azimuth": 90.679978
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-12-21T20:00:00Z",
+  "elevation": -41.781466,
+  "azimuth": 120.826432
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-12-21T00:10:00Z",
+  "elevation": 14.934921,
+  "azimuth": 114.700618
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-12-04T00:00:00Z",
+  "elevation": 14.612419,
+  "azimuth": 113.371325
+ },
+ {
+  "site": "Singapore",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "utc": "2026-07-15T02:30:00Z",
+  "elevation": 46.00482,
+  "azimuth": 59.732335
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-03-20T19:00:00Z",
+  "elevation": -12.967818,
+  "azimuth": 98.802022
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-03-20T12:00:00Z",
+  "elevation": -45.553037,
+  "azimuth": 226.718088
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-06-21T20:00:00Z",
+  "elevation": -12.233897,
+  "azimuth": 69.839515
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-06-21T13:30:00Z",
+  "elevation": -78.013726,
+  "azimuth": 211.27352
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-09-23T17:00:00Z",
+  "elevation": -33.469637,
+  "azimuth": 116.782804
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-09-23T23:45:00Z",
+  "elevation": 45.943035,
+  "azimuth": 47.02336
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-12-21T20:00:00Z",
+  "elevation": 14.162912,
+  "azimuth": 108.984867
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-12-21T00:10:00Z",
+  "elevation": 65.21486,
+  "azimuth": 71.889385
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-12-04T00:00:00Z",
+  "elevation": 64.14766,
+  "azimuth": 70.0508
+ },
+ {
+  "site": "Sydney",
+  "lat": -33.8688,
+  "lon": 151.2093,
+  "utc": "2026-07-15T02:30:00Z",
+  "elevation": 34.194094,
+  "azimuth": 351.881144
+ }
+]

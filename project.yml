@@ -1,0 +1,100 @@
+name: LikeWater
+options:
+  bundleIdPrefix: com.likewater
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: FMDJTXM4W7
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+packages:
+  LikeWaterEngine:
+    path: Engine
+targets:
+  LikeWater:
+    type: application
+    platform: iOS
+    sources:
+      - path: Apps/LikeWater
+      - path: Apps/Shared
+      - path: Resources
+        buildPhase: resources
+    dependencies:
+      - package: LikeWaterEngine
+        product: LikeWaterEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.likewater.app
+        INFOPLIST_KEY_CFBundleDisplayName: Like Water
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Like Water paints the streets that lead to your destination without losing distance."
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+  SunMap:
+    type: application
+    platform: iOS
+    sources:
+      - path: Apps/SunMap
+      - path: Apps/Shared
+      - path: Resources
+        buildPhase: resources
+    dependencies:
+      - package: LikeWaterEngine
+        product: LikeWaterEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.likewater.sunmap
+        INFOPLIST_KEY_CFBundleDisplayName: Sun Map
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Sun Map shows which sidewalks around you are in the sun right now."
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+  LikeWaterUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/LikeWater
+    dependencies:
+      - target: LikeWater
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: LikeWater
+  SunMapUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/SunMap
+    dependencies:
+      - target: SunMap
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: SunMap
+schemes:
+  LikeWater:
+    build:
+      targets:
+        LikeWater: all
+        LikeWaterUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [LikeWaterUITests]
+  SunMap:
+    build:
+      targets:
+        SunMap: all
+        SunMapUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [SunMapUITests]

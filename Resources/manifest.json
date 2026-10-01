@@ -1,0 +1,40 @@
+{
+  "cities": [
+    {
+      "name": "Berkeley",
+      "file": "berkeley.lwbundle",
+      "minLat": 37.845477501832434,
+      "minLon": -122.3077681,
+      "maxLat": 37.904966104135646,
+      "maxLon": -122.23401592907912,
+      "bytes": 9438912,
+      "nodes": 55644,
+      "edges": 69575,
+      "timezone": "America/Los_Angeles"
+    },
+    {
+      "name": "San Francisco",
+      "file": "sanfrancisco.lwbundle",
+      "minLat": 37.7067922,
+      "minLon": -122.5142828,
+      "maxLat": 37.8113754,
+      "maxLon": -122.3637098711928,
+      "bytes": 33426232,
+      "nodes": 266222,
+      "edges": 335871,
+      "timezone": "America/Los_Angeles"
+    },
+    {
+      "name": "Moorpark",
+      "file": "moorpark.lwbundle",
+      "minLat": 34.260654158427826,
+      "minLon": -118.91725417975142,
+      "maxLat": 34.30805628140661,
+      "maxLon": -118.820843,
+      "bytes": 6035688,
+      "nodes": 39381,
+      "edges": 49497,
+      "timezone": "America/Los_Angeles"
+    }
+  ]
+}
