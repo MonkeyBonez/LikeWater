@@ -84,6 +84,25 @@ version 2 plus a per-node global id. A phone without a server can be given a met
 directly: copy `Server/<id>/` into the app's `Library/Application Support/Cities/<id>/`
 (`xcrun devicectl device copy to --domain-type appDataContainer …`).
 
+## The route
+
+Inside the corridor Like Water suggests one route (PLAN.md §1.3–1.5, LEARNINGS §11):
+- **Cost** of an edge entered τ s after departure: `seconds · (1 − 0.9·λ·sun(edge, slot(τ)))`
+  for sidewalks, full seconds for crossings; λ is the Fastest ↔ Sunniest slider.
+- **Bound**: Pareto-label Dijkstra over corridor edges, pruned by `metres + dTo ≤ D·(1+slack)`
+  — the route never leaves the corridor or its slack.
+- **Time of arrival**: sun is scored per 15-minute slot of the clock, only for the slots a
+  walker could be on each edge (`SunTimeline`), cached across fixes; the beam per slot comes
+  from the sky along the walk.
+- **ETA**: `PaceModel` — pace (Relaxed/Normal/Brisk), Tobler slope from terrain, 12 s per
+  crossing, stairs 0.6×; `PaceEstimator` learns the walker's pace from real walks.
+- **Hysteresis**: the route being walked is kept while within 5 % of the new optimum.
+
+```sh
+Engine/.build/release/lwtool route --metro Server/nyc --from 40.7580,-73.9855 --to 40.7359,-73.9911 \
+  --at 2026-09-23T17:00:00Z --sun-weight 1 --compare --ladder --walk --out route.geojson
+```
+
 ## Satellite fog (proof of concept)
 
 The sky layer is a forecast (HRRR via Open-Meteo). Whether observing the fog from GOES-West

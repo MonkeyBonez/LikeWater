@@ -22,6 +22,19 @@ final class AppModel: ObservableObject {
     @Published var daylight: (sunrise: Date, sunset: Date)?
     @Published var userCoordinate: CLLocationCoordinate2D?
     @Published var overlayVersion = 0
+    /// Bumped when only the route line changed (a slider move), so the map swaps that one
+    /// overlay instead of redrawing the corridor.
+    @Published var routeVersion = 0
+    /// Fastest (0) ↔ Sunniest (1). Detents at quarters; default Balanced.
+    @Published var sunWeight: Double = UserDefaults.standard.object(forKey: "sunWeight") as? Double ?? 0.5
+    @Published var prefer: RoutePreference = RoutePreference(rawValue: UserDefaults.standard.string(forKey: "routePrefer") ?? "") ?? .sun
+    /// The walker's flat pace, m/s: their choice, else what earlier walks measured, else 1.4.
+    @Published var pace: Double = UserDefaults.standard.object(forKey: "walkingPace") as? Double
+        ?? UserDefaults.standard.object(forKey: "learnedPace") as? Double ?? 1.4
+    /// Predicted vs actual seconds of the last finished walk (debug line; ETA accuracy log).
+    @Published var lastWalkTiming: (predicted: Double, actual: Double)?
+    private var paceEstimator = PaceEstimator(learned: UserDefaults.standard.object(forKey: "learnedPace") as? Double)
+    private var rerouteTask: Task<Void, Never>?
     @Published var fitRequest = 0
     @Published var arrived = false
     @Published var showSettings = false
@@ -119,6 +132,13 @@ final class AppModel: ObservableObject {
         if let raw = defaults.string(forKey: "uiTestSlack"), let value = Double(raw) {
             slack = min(max(value, 0), 0.6)
         }
+        if let raw = defaults.string(forKey: "uiTestSunWeight"), let value = Double(raw) {
+            sunWeight = min(max(value, 0), 1)
+        }
+        if let raw = defaults.string(forKey: "uiTestPace"), let value = Double(raw) { pace = value }
+        if let raw = defaults.string(forKey: "uiTestPrefer"), let value = RoutePreference(rawValue: raw) {
+            prefer = value
+        }
         if let raw = defaults.string(forKey: "uiTestLayer"),
            let value = MapLayer(rawValue: raw) {
             layer = value
@@ -191,6 +211,7 @@ final class AppModel: ObservableObject {
         destination = place
         snapshot = nil
         arrived = false
+        walkStarted = false
         phase = .working
         Task {
             await service.setDestination(place.coordinate)
@@ -217,6 +238,34 @@ final class AppModel: ObservableObject {
     func setSlack(_ value: Double) {
         slack = value
         scheduleRecompute()
+    }
+
+    func setSunWeight(_ value: Double) {
+        sunWeight = value
+        UserDefaults.standard.set(value, forKey: "sunWeight")
+        rerouteTask?.cancel()
+        rerouteTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard let self, !Task.isCancelled else { return }
+            let route = await self.service.reroute(sunWeight: value, prefer: self.prefer)
+            guard !Task.isCancelled, var snap = self.snapshot else { return }
+            snap.route = route
+            snap.arrival = route.map { snap.departure.addingTimeInterval($0.seconds) }
+            self.snapshot = snap
+            self.routeVersion += 1
+        }
+    }
+
+    func setPace(_ value: Double) {
+        pace = value
+        UserDefaults.standard.set(value, forKey: "walkingPace")
+        scheduleRecompute()
+    }
+
+    func setPrefer(_ value: RoutePreference) {
+        prefer = value
+        UserDefaults.standard.set(value.rawValue, forKey: "routePrefer")
+        scheduleRecompute(immediate: true)
     }
 
     func setScrubDate(_ value: Date) {
@@ -252,9 +301,14 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            let snap = try await service.update(user: user, slack: slack,
-                                                layer: layer, date: scrubDate)
+            // Unpinned, the walk leaves now: the route's sun and the ETA are for now.
+            if !datePinned { scrubDate = Date() }
+            let snap = try await service.update(user: user, slack: slack, layer: layer, date: scrubDate,
+                                                pace: WalkingPace(metresPerSecond: pace),
+                                                sunWeight: sunWeight, prefer: prefer)
+            guard !Task.isCancelled else { return }
             snapshot = snap
+            trackPace(snap)
             phase = .ready
             overlayVersion += 1
             if fit { fitRequest += 1 }
@@ -267,8 +321,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var walkStarted = false
+
+    /// Real GPS walks teach the pace model; simulated steps would teach it nonsense.
+    private func trackPace(_ snap: CorridorSnapshot) {
+        guard let route = snap.route else { return }
+        if !walkStarted {
+            walkStarted = true
+            paceEstimator.start(metres: route.metres, seconds: route.seconds, at: Date())
+        } else if !usingSimulatedWalk {
+            paceEstimator.observe(remainingMetres: route.metres, at: Date())
+        }
+    }
+
     /// PRD state 5: within 20 m, clear the corridor and return to state 1.
     private func handleArrival() {
+        if !usingSimulatedWalk, let timing = paceEstimator.arrive(at: Date()) {
+            lastWalkTiming = timing
+            if let learned = paceEstimator.learned { UserDefaults.standard.set(learned, forKey: "learnedPace") }
+        }
+        walkStarted = false
         arrived = true
         clearDestination()
         Task { @MainActor in
@@ -283,7 +355,7 @@ final class AppModel: ObservableObject {
         guard let user = effectiveUserCoordinate else { return }
         Task {
             if let next = await service.step(from: user, meters: meters, slack: slack,
-                                             strategy: random ? .random : .shortest) {
+                                             strategy: random ? .random : .route) {
                 usingSimulatedWalk = true
                 userCoordinate = next
                 await recompute(fit: false)
@@ -329,13 +401,78 @@ final class AppModel: ObservableObject {
     }
 
     var scrubTimeText: String {
+        var text = clock(scrubDate)
+        if let arrival = snapshot?.arrival, snapshot?.route != nil {
+            text = "Leave \(clock(scrubDate, zone: false)) → \(clock(arrival))"
+        }
+        return text
+    }
+
+    /// h:mm a in the city's zone, with the zone named when it isn't the phone's.
+    private func clock(_ date: Date, zone showZone: Bool = true) -> String {
         let f = DateFormatter(); f.dateFormat = "h:mm a"
         let zone = snapshot?.timeZone ?? ambient?.timeZone ?? .current
         f.timeZone = zone
-        var text = f.string(from: scrubDate)
-        if zone.secondsFromGMT(for: scrubDate) != TimeZone.current.secondsFromGMT(for: scrubDate) {
-            text += " " + (zone.abbreviation(for: scrubDate) ?? "")
+        var text = f.string(from: date)
+        if showZone, zone.secondsFromGMT(for: date) != TimeZone.current.secondsFromGMT(for: date) {
+            text += " " + (zone.abbreviation(for: date) ?? "")
         }
+        return text
+    }
+
+    static func minutes(_ seconds: Double) -> String {
+        let m = Int((seconds / 60).rounded())
+        return m >= 60 ? "\(m / 60) h \(m % 60) min" : "\(max(m, 1)) min"
+    }
+
+    /// Remaining seconds of the route, rescaled by the walker's measured pace once known.
+    var etaSeconds: Double? {
+        guard let route = snapshot?.route else { return nil }
+        return paceEstimator.remainingSeconds(model: route.seconds, settingPace: pace)
+    }
+
+    /// "1.9 km · 24 min · arrive 4:54 PM" — on every layer.
+    var etaText: String? {
+        guard let route = snapshot?.route, let seconds = etaSeconds, let snap = snapshot else { return nil }
+        let distance = route.metres >= 1000 ? String(format: "%.1f km", route.metres / 1000)
+                                            : "\(Int(route.metres.rounded())) m"
+        return "\(distance) · \(Self.minutes(seconds)) · arrive \(clock(snap.departure.addingTimeInterval(seconds)))"
+    }
+
+    /// "26 min · 71 % sun · +2 min vs fastest".
+    var routeReadout: String? {
+        guard let route = snapshot?.route else { return nil }
+        var text = Self.minutes(route.seconds)
+        if route.hasSun { text += String(format: " · %.0f%% sun", route.sunFraction * 100) }
+        let extra = route.seconds - route.fastestSeconds
+        if extra >= 30 { text += " · +\(Self.minutes(extra)) vs fastest" }
+        else if route.hasSun && route.sunFraction > route.fastestSunFraction + 0.01 { text += " · no extra time" }
+        else { text += " · fastest" }
+        return text
+    }
+
+    /// The two ends of the slider, labelled with what they'd give.
+    var fastestCaption: String {
+        guard let r = snapshot?.route else { return "Fastest" }
+        return "Fastest " + Self.minutes(r.fastestSeconds) + (r.hasSun ? String(format: " · %.0f%%", r.fastestSunFraction * 100) : "")
+    }
+
+    var sunniestCaption: String {
+        let name = prefer == .sun ? "Sunniest" : "Shadiest"
+        guard let r = snapshot?.route, let s = r.sunniestSeconds, let f = r.sunniestSunFraction else { return name }
+        return name + " " + Self.minutes(s) + String(format: " · %.0f%%", f * 100)
+    }
+
+    /// "Sun sets 7:07 PM, 17 min into your walk".
+    var sunsetNote: String? {
+        guard let r = snapshot?.route, let t = r.sunsetSeconds, let at = r.sunsetAt else { return nil }
+        return "Sun sets \(clock(at)), \(Self.minutes(t)) into your walk"
+    }
+
+    var stripSummary: String {
+        guard let r = snapshot?.route, r.hasSun, r.seconds > 0 else { return "" }
+        var text = String(format: "sun %.0f%% · shade %.0f%%", r.sunFraction * 100, (1 - r.sunFraction) * 100)
+        if let t = r.sunsetSeconds { text += " · sunset at \(Self.minutes(t))" }
         return text
     }
 }

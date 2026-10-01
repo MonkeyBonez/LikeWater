@@ -17,7 +17,43 @@ struct CorridorEdgeView: Sendable {
     /// 0, 1, or 2 — the PRD's three interest brightness buckets.
     var interestBucket: Int
     /// 0, 1, or 2 for shaded / mixed / sunny; nil when the sun layer is not active.
+    /// Scored for when the walker would first reach the edge heading straight there.
     var sunBucket: Int?
+    /// Fraction of the clear-sky beam at that time and place (fades the colour).
+    var beam: Float = 1
+}
+
+/// One stretch of the sun strip under the slider: seconds after departure.
+struct StripSegment: Sendable, Equatable {
+    var start: Double
+    var end: Double
+    var bucket: Int
+    var beam: Float
+}
+
+/// The suggested route, ready to draw and read out.
+struct RouteView: Sendable {
+    var coordinates: [CLLocationCoordinate2D]
+    /// Per edge: 0/1/2 shaded/mixed/sunny when the walker is on it; empty without sun.
+    var edgeBuckets: [Int]
+    var edgeBeams: [Float]
+    var seconds: Double
+    var metres: Double
+    var sunFraction: Double
+    var fastestSeconds: Double
+    var fastestSunFraction: Double
+    var sunniestSeconds: Double?
+    var sunniestSunFraction: Double?
+    var strip: [StripSegment]
+    /// Seconds into the walk at which the sun sets, when it does.
+    var sunsetSeconds: Double?
+    var sunsetAt: Date?
+    /// True when hysteresis kept the route the walker was already on.
+    var kept: Bool
+    var hasSun: Bool
+    var sunWeight: Double
+    var routeMs: Double
+    var labelsExpanded: Int
 }
 
 struct CorridorSnapshot: Sendable {
@@ -43,6 +79,12 @@ struct CorridorSnapshot: Sendable {
     var timeZone: TimeZone?
     /// The sky over the walker when the Sun layer is on; nil otherwise or with no forecast.
     var sky: SkyCondition?
+    var route: RouteView?
+    var departure: Date
+    var arrival: Date?
+    var timelineMs: Double = 0
+    var scoredPairs: Int = 0
+    var cacheHits: Int = 0
 }
 
 enum ServiceError: Error, LocalizedError {
@@ -59,6 +101,20 @@ actor CorridorService {
     private var destinationCoordinate: CLLocationCoordinate2D?
     private var destinationNode: Int32?
     private var lastLabelMs: Double = 0
+    private var slotCache = SunSlotCache()
+
+    /// What the last update computed, so a slider move re-runs only the route search.
+    private struct Context {
+        var corridor: Corridor
+        var labels: DestinationLabels
+        var origin: Int32
+        var timeline: SunTimeline?
+        var seconds: EdgeSeconds
+        var departure: Date
+    }
+    private var context: Context?
+    private var lastRoute: Route?
+    private var lastPrefer: RoutePreference = .sun
 
     /// PRD: arrival is within 20 m of the destination node.
     static let arrivalRadius: Double = 20
@@ -73,8 +129,11 @@ actor CorridorService {
         city = wanted
         scorer = SunScorer(buildings: wanted.bundle.buildings)
         scratch = CorridorScratch(graph: wanted.bundle.graph)
+        slotCache = SunSlotCache()
         labels = nil
         destinationNode = nil
+        context = nil
+        lastRoute = nil
     }
 
     var cityName: String? { city?.name }
@@ -83,17 +142,23 @@ actor CorridorService {
         destinationCoordinate = coordinate
         labels = nil
         destinationNode = nil
+        context = nil
+        lastRoute = nil
     }
 
     func clear() {
         destinationCoordinate = nil
         labels = nil
         destinationNode = nil
+        context = nil
+        lastRoute = nil
     }
 
     func update(user: CLLocationCoordinate2D, slack: Double,
-                layer: MapLayer, date: Date) async throws -> CorridorSnapshot {
+                layer: MapLayer, date: Date, pace: WalkingPace = .normal,
+                sunWeight: Double = 0.5, prefer: RoutePreference = .sun) async throws -> CorridorSnapshot {
         try await prepare(for: user)
+        try Task.checkCancellation()
         guard let city, var scorer else { throw ServiceError.noDestination }
         self.scorer = nil      // held locally while mutating, so its scratch isn't copied
         defer { self.scorer = scorer }
@@ -131,12 +196,15 @@ actor CorridorService {
         let corridor = try CorridorEngine.corridor(graph: graph, labels: labels,
                                                    origin: origin, slack: slack, scratch: scratch)
 
-        // Layer scoring.
+        // Pace and the sun timeline: both the route and the Sun layer use them, so the
+        // colours, the route and the ETA agree on when the walker gets where.
         let t0 = CFAbsoluteTimeGetCurrent()
+        let seconds = PaceModel(pace: pace).edgeSeconds(graph: graph, edges: corridor.edges,
+                                                        terrain: city.bundle.buildings.terrain)
         var sun: SolarPosition?
-        var sunScores: [Float] = []
         var sky: SkyCondition?
-        if layer == .sun {
+        var timeline: SunTimeline?
+        if layer == .sun || sunWeight > 0 {
             let p = Solar.position(latitude: user.latitude, longitude: user.longitude, date: date)
             sun = p
             // Same forecast Sun Map uses: under cloud the geometry is still right, but
@@ -147,11 +215,20 @@ actor CorridorService {
             } else {
                 field = await WeatherService.shared.sky(around: user, for: date)
             }
+            try Task.checkCancellation()
             sky = field?.condition(latitude: user.latitude, longitude: user.longitude,
                                    at: date, sunElevation: p.elevation)
-            sunScores = scorer.score(graph: graph, edges: corridor.edges, sun: p)
+            slotCache.drop(before: Int((date.timeIntervalSince1970 / 900).rounded(.down)) - 1)
+            timeline = SunTimelineBuilder.build(
+                graph: graph, corridor: corridor, origin: graph.coordinate(origin),
+                destination: graph.coordinate(destinationNode), departure: date, pace: pace,
+                edgeSeconds: seconds, scorer: &scorer, cache: slotCache, sky: field)
         }
         let layerMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+
+        context = Context(corridor: corridor, labels: labels, origin: origin, timeline: timeline,
+                          seconds: seconds, departure: date)
+        let route = makeRoute(graph: graph, sunWeight: sunWeight, prefer: prefer, hysteresis: true)
 
         var edges: [CorridorEdgeView] = []
         edges.reserveCapacity(corridor.edges.count)
@@ -175,7 +252,10 @@ actor CorridorService {
                 excess: corridor.excess[i],
                 isCrossing: crossing,
                 interestBucket: interest == 0 ? 0 : (interest <= 3 ? 1 : 2),
-                sunBucket: layer == .sun ? (sun?.isUp == true ? SunBucket(fraction: sunScores[i]).rawValue : 0) : nil))
+                sunBucket: layer == .sun ? timeline.map {
+                    SunBucket(fraction: $0.geometricSun(edge: i, slot: $0.slot(atSeconds: corridor.fromOrigin[i] / pace.metresPerSecond))).rawValue
+                } ?? 0 : nil,
+                beam: timeline.map { $0.beam[$0.slot(atSeconds: corridor.fromOrigin[i] / pace.metresPerSecond)] } ?? 1))
         }
 
         let destinationPoint = graph.coordinate(destinationNode)
@@ -192,8 +272,82 @@ actor CorridorService {
             edgeCount: corridor.edges.count, crossingCount: corridor.crossingEdges.count,
             nodesExplored: corridor.nodesExplored,
             labelMs: lastLabelMs, corridorMs: corridor.computeMs, layerMs: layerMs,
-            rebuiltLabels: rebuilt, sun: sun, hasArrived: arrived, city: city.name,
-            timeZone: city.timeZone, sky: sky)
+            rebuiltLabels: rebuilt, sun: layer == .sun ? sun : nil, hasArrived: arrived, city: city.name,
+            timeZone: city.timeZone, sky: layer == .sun ? sky : nil, route: route, departure: date,
+            arrival: route.map { date.addingTimeInterval($0.seconds) },
+            timelineMs: timeline?.computeMs ?? 0, scoredPairs: timeline?.scoredPairs ?? 0,
+            cacheHits: timeline?.cacheHits ?? 0)
+    }
+
+    /// The slider moved: one route search over the last corridor and timeline.
+    func reroute(sunWeight: Double, prefer: RoutePreference) -> RouteView? {
+        guard let graph = city?.bundle.graph else { return nil }
+        return makeRoute(graph: graph, sunWeight: sunWeight, prefer: prefer, hysteresis: false)
+    }
+
+    private func makeRoute(graph: PedestrianGraph, sunWeight: Double, prefer: RoutePreference,
+                           hysteresis: Bool) -> RouteView? {
+        guard let ctx = context else { return nil }
+        func run(_ w: Double) -> Route? {
+            try? RouteEngine.route(graph: graph, corridor: ctx.corridor, labels: ctx.labels, origin: ctx.origin,
+                                   timeline: ctx.timeline, edgeSeconds: ctx.seconds, sunWeight: w, prefer: prefer)
+        }
+        guard var chosen = run(sunWeight) else { lastRoute = nil; return nil }
+        var kept = false
+        // Hysteresis: the walker is on the previous route and the rest of it is still
+        // within 5 % of the new optimum — keep it, so the line doesn't flicker per fix.
+        if hysteresis, let prev = lastRoute, prev.sunWeight == sunWeight, lastPrefer == prefer,
+           let at = prev.nodes.firstIndex(of: ctx.origin), at < prev.edges.count,
+           let rest = RouteEngine.evaluate(edges: Array(prev.edges[at...]), from: ctx.origin, graph: graph,
+                                           corridor: ctx.corridor, timeline: ctx.timeline,
+                                           edgeSeconds: ctx.seconds, sunWeight: sunWeight, prefer: prefer),
+           rest.edges != chosen.edges, RouteEngine.shouldKeep(previous: rest, candidate: chosen) {
+            var r = rest
+            r.computeMs = chosen.computeMs; r.labelsExpanded = chosen.labelsExpanded
+            chosen = r; kept = true
+        } else if hysteresis, let prev = lastRoute, let at = prev.nodes.firstIndex(of: ctx.origin),
+                  Array(prev.edges[at...]) == chosen.edges {
+            kept = true
+        }
+        lastRoute = chosen; lastPrefer = prefer
+        let fastest = sunWeight == 0 ? chosen : (run(0) ?? chosen)
+        let sunniest = ctx.timeline == nil ? nil : (sunWeight == 1 ? chosen : run(1))
+        return view(of: chosen, fastest: fastest, sunniest: sunniest, timeline: ctx.timeline,
+                    departure: ctx.departure, graph: graph, kept: kept)
+    }
+
+    private func view(of r: Route, fastest: Route, sunniest: Route?, timeline: SunTimeline?,
+                      departure: Date, graph: PedestrianGraph, kept: Bool) -> RouteView {
+        var buckets: [Int] = [], beams: [Float] = [], strip: [StripSegment] = []
+        if let timeline {
+            for k in r.edges.indices {
+                let slot = r.edgeSlot[k]
+                let bucket = SunBucket(fraction: timeline.geometricSun(edge: r.corridorIndex[k], slot: slot)).rawValue
+                let beam = timeline.beam[slot]
+                buckets.append(bucket); beams.append(beam)
+                let a = r.arrivalSeconds[k], b = r.arrivalSeconds[k + 1]
+                // Daylight shade under a lit sky vs. no beam at all read the same on the strip.
+                let shown = beam < 0.15 ? 0 : bucket
+                if var last = strip.last, last.bucket == shown, abs(last.beam - beam) < 0.1 {
+                    last.end = b; strip[strip.count - 1] = last
+                } else {
+                    strip.append(StripSegment(start: a, end: b, bucket: shown, beam: beam))
+                }
+            }
+        }
+        var sunsetSeconds: Double?
+        if let s = timeline?.sunset {
+            let t = s.timeIntervalSince(departure)
+            if t > 0 && t < r.seconds { sunsetSeconds = t }
+        }
+        return RouteView(
+            coordinates: r.nodes.map { let c = graph.coordinate($0); return CLLocationCoordinate2D(latitude: c.lat, longitude: c.lon) },
+            edgeBuckets: buckets, edgeBeams: beams, seconds: r.seconds, metres: r.metres,
+            sunFraction: r.sunFraction, fastestSeconds: fastest.seconds, fastestSunFraction: fastest.sunFraction,
+            sunniestSeconds: sunniest?.seconds, sunniestSunFraction: sunniest?.sunFraction,
+            strip: strip, sunsetSeconds: sunsetSeconds, sunsetAt: sunsetSeconds.map { departure.addingTimeInterval($0) },
+            kept: kept, hasSun: timeline != nil, sunWeight: r.sunWeight, routeMs: r.computeMs,
+            labelsExpanded: r.labelsExpanded)
     }
 
     func daylightWindow(at coordinate: CLLocationCoordinate2D, on date: Date) -> (sunrise: Date, sunset: Date)? {
@@ -201,7 +355,7 @@ actor CorridorService {
                              containing: date)
     }
 
-    enum StepStrategy { case shortest, random }
+    enum StepStrategy { case shortest, random, route }
 
     /// Walks forward inside the corridor for roughly `meters`. `.random` picks any free
     /// choice, which is the claim the product makes: inside the corridor, choice is free.
@@ -209,6 +363,15 @@ actor CorridorService {
               strategy: StepStrategy) -> CLLocationCoordinate2D? {
         guard let graph = city?.bundle.graph, let labels,
               var current = graph.nearestConnectedNode(lat: user.latitude, lon: user.longitude) else { return nil }
+        if strategy == .route, let route = lastRoute, let at = route.nodes.firstIndex(of: current) {
+            // Follow the suggested route, the way a walker who trusts it would.
+            var walked = 0.0, k = at
+            while k < route.edges.count && walked < meters {
+                walked += graph.edgeLen[Int(route.edges[k])]; k += 1
+            }
+            current = route.nodes[k]
+            return CLLocationCoordinate2D(latitude: graph.nodeLat[Int(current)], longitude: graph.nodeLon[Int(current)])
+        }
         let dTo = labels.dTo
         var walked = 0.0
         var guardCounter = 0

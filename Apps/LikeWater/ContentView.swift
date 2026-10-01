@@ -151,6 +151,11 @@ struct ContentView: View {
                         Text("\(model.distanceText) to go · corridor of \(model.snapshot!.edgeCount) segments")
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("subtitle")
+                        if let eta = model.etaText {
+                            Text(eta)
+                                .font(.subheadline.weight(.medium).monospacedDigit())
+                                .accessibilityIdentifier("etaText")
+                        }
                     }
                     Spacer()
                     Button { model.fitRequest += 1 } label: {
@@ -158,6 +163,8 @@ struct ContentView: View {
                     }
                     .accessibilityIdentifier("fitButton")
                 }
+
+                if model.snapshot?.route != nil { routeControls }
 
                 if model.layer == .sun { sunScrubber }
 
@@ -189,6 +196,15 @@ struct ContentView: View {
                             .accessibilityIdentifier("debugStats")
                         Text("labels \(String(format: "%.1f", s.labelMs)) ms\(s.rebuiltLabels ? " (built)" : " (reused)") · corridor \(String(format: "%.1f", s.corridorMs)) ms · layer \(String(format: "%.1f", s.layerMs)) ms")
                             .accessibilityIdentifier("timingStats")
+                        if let r = s.route {
+                            Text("route \(String(format: "%.1f", r.routeMs)) ms · \(r.labelsExpanded) labels · \(r.kept ? "kept" : "new") · scored \(s.scoredPairs) (+\(s.cacheHits) cached) · pace \(String(format: "%.2f", model.pace)) m/s")
+                                .accessibilityIdentifier("routeStats")
+                                .accessibilityValue(r.kept ? "kept" : "new")
+                        }
+                        if let t = model.lastWalkTiming {
+                            Text("last walk: predicted \(AppModel.minutes(t.predicted)) · actual \(AppModel.minutes(t.actual))")
+                                .accessibilityIdentifier("walkTiming")
+                        }
                     }
                     .font(.caption2.monospaced()).foregroundStyle(.secondary)
                 }
@@ -196,6 +212,41 @@ struct ContentView: View {
             .padding(16)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
             .padding(10)
+        }
+    }
+
+    /// Which route: Fastest ↔ Sunniest, with what each end gives and what this one costs.
+    @ViewBuilder private var routeControls: some View {
+        if let route = model.snapshot?.route {
+            VStack(alignment: .leading, spacing: 6) {
+                if let text = model.routeReadout {
+                    Text(text).font(.subheadline.weight(.semibold).monospacedDigit())
+                        .accessibilityIdentifier("routeReadout")
+                }
+                if route.hasSun {
+                    Slider(value: Binding(get: { model.sunWeight }, set: { model.setSunWeight($0) }),
+                           in: 0...1, step: 0.25)
+                        .accessibilityIdentifier("sunWeightSlider")
+                    HStack {
+                        Text(model.fastestCaption)
+                        Spacer()
+                        Text(model.sunniestCaption)
+                    }
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    SunStrip(route: route)
+                        .frame(height: 10)
+                        .accessibilityIdentifier("sunStrip")
+                        .accessibilityLabel("Sun along the route")
+                        .accessibilityValue(model.stripSummary)
+                    if let note = model.sunsetNote {
+                        HStack(spacing: 6) {
+                            Image(systemName: "sunset.fill").accessibilityHidden(true)
+                            Text(note).accessibilityIdentifier("sunsetNote")
+                        }
+                        .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
         }
     }
 
@@ -244,6 +295,9 @@ struct ContentView: View {
                 dot(Color(red: 0.93, green: 0.36, blue: 0.72), "4+")
             case .sun:
                 sunLegend
+                if model.snapshot?.route != nil {
+                    Text("at arrival").lineLimit(1)
+                }
                 if let text = model.skyText {
                     Text(text).lineLimit(1).accessibilityIdentifier("skyStatus")
                 }
@@ -295,6 +349,28 @@ struct SettingsSheet: View {
                     }
                 } footer: {
                     Text("How much extra distance a street may cost and still count as a free choice.")
+                }
+
+                Section {
+                    Picker("Walking pace", selection: Binding(get: { model.pace }, set: { model.setPace($0) })) {
+                        Text("Relaxed").tag(WalkingPace.relaxed.metresPerSecond)
+                        Text("Normal").tag(WalkingPace.normal.metresPerSecond)
+                        Text("Brisk").tag(WalkingPace.brisk.metresPerSecond)
+                        if ![1.1, 1.4, 1.7].contains(model.pace) {
+                            Text(String(format: "Yours (%.1f km/h)", model.pace * 3.6)).tag(model.pace)
+                        }
+                    }
+                    .accessibilityIdentifier("paceSetting")
+                    Picker("Prefer", selection: Binding(get: { model.prefer }, set: { model.setPrefer($0) })) {
+                        Text("Sun").tag(RoutePreference.sun)
+                        Text("Shade").tag(RoutePreference.shade)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("preferSetting")
+                } header: {
+                    Text("Route")
+                } footer: {
+                    Text("Times use your pace plus hills, crossings and stairs. Slack above is how much longer the sunniest route may be.")
                 }
 
                 Section("Developer") {
@@ -374,5 +450,29 @@ struct SearchSheet: View {
             }
         }
         .presentationDetents([.large])
+    }
+}
+
+/// Sun and shade along the route in walking order, the way the walker will meet them.
+struct SunStrip: View {
+    let route: RouteView
+
+    var body: some View {
+        Canvas { ctx, size in
+            let total = max(route.seconds, 1)
+            for seg in route.strip {
+                let x0 = size.width * seg.start / total, x1 = size.width * seg.end / total
+                let base: UIColor = [UIColor(red: 0.30, green: 0.40, blue: 0.52, alpha: 1),
+                                     UIColor(red: 0.90, green: 0.84, blue: 0.62, alpha: 1),
+                                     UIColor(red: 1.00, green: 0.73, blue: 0.13, alpha: 1)][min(max(seg.bucket, 0), 2)]
+                ctx.fill(Path(CGRect(x: x0, y: 0, width: max(x1 - x0, 0.5), height: size.height)),
+                         with: .color(Color(SkyPalette.fade(base, beam: Double(seg.beam)))))
+            }
+            if let t = route.sunsetSeconds {
+                let x = size.width * t / total
+                ctx.fill(Path(CGRect(x: x - 1, y: -2, width: 2, height: size.height + 4)), with: .color(.orange))
+            }
+        }
+        .clipShape(Capsule())
     }
 }

@@ -494,6 +494,65 @@ tile set the walker snaps to any component ≥ 300 nodes, not the largest.
 
 ---
 
+## 11. A route inside the corridor (2026-09-30)
+
+The owner reversed the PRD's "never pick a route / no ETA": Like Water now draws one
+suggested route inside the corridor, with minutes and arrival time on every layer, and a
+Fastest ↔ Sunniest slider. Everything below is `lwtool route` (release build, Mac) on
+2026-09-23 departures unless it says otherwise.
+
+### 11.1 Scoring the sun for when you get there changes the route — sometimes, and a lot
+Five walks × three departures (9 am, 1 pm, ~sunset−1 h), λ = 1, time-aware vs scoring
+every street at the departure instant (`--compare`, both then lit by the time-aware truth):
+| Walk | slack 0.1 | slack 0.3 |
+|---|---|---|
+| Times Sq → Union Sq, 1 pm | **+11 points** sun (89 % vs 78 %) | **+19** (90 vs 71) |
+| Union Sq → Ferry Building, 6:07 pm | +5 (30 vs 25) | **+15** (30 vs 15) |
+| Union Sq → Ferry Building, 1 pm | 0 | +2 |
+| SoMa → Caltrain (8 min walk), all three | 0 | 0 |
+| the other cells | 0 | 0 |
+The effect needs a walk long enough to cross a slot boundary and a sky where shadows move
+fast (low sun, deep canyons). Short walks and noon don't care; Midtown and sunset do.
+Pinned by `MetroTests.testNewYorkTimeAwareRouteFindsMoreSun`.
+
+### 11.2 Discounting crossing time for sun made the router zig-zag
+The first cost function discounted *every* edge by its sun, crossings included. At
+λ = 1 a SoMa route crossed the street **15 times in 650 m** (fastest: 2) to stay on the lit
+side — each 12 s wait in the sun was nearly free. Crossings (road surface + the wait) now
+always cost their full seconds, and the sun percentage shown is over sidewalk time only,
+matching the cost; same route now: 2 crossings. A cost term the user doesn't experience as
+"sun" must not be bought with sun.
+
+### 11.3 What it costs and how big the choice is
+- **Pareto sets are real but small**: 1–8 distinct routes over 11 λ values (most walks
+  1–3 at slack 0.1, 5–8 in Midtown at 0.3). A continuous slider with 5 detents is right; a
+  3-stop picker would often show three identical routes.
+- **Price of sun**: 0.4–4 min per +10 % sun depending on the walk (SoMa 0.4, Midtown at
+  noon 3–4).
+- **Timeline**: scored pairs are 58–82 % of edges × slots (the ±1-slot widening that covers
+  hills and crossing waits costs more than the plan's "≤ 2 slots per edge"); 1–8 ms in SF,
+  35–140 ms in NYC (slack 0.1/0.3). The next fix reuses the cache (in the app: 0 scored,
+  1,098 cached after a step).
+- **Route search**: 0.1–25 ms; Midtown at slack 0.3 hits the 16-label cap ~3,000 times
+  (55k labels). Fine on the Mac; watch it on the phone before raising slack defaults.
+- **Fastest is not shortest**: with 12 s per crossing the time-optimal Times Sq → Union Sq
+  walk is 2,794 m against the 2,583 m shortest — it trades distance for fewer crossings.
+
+### 11.4 Hysteresis is needed, 5 % is not enough in Midtown
+Simulated walks re-routing every 50 m (`--walk`): SF 0–3 changes/km with tolerance 0,
+**0 – 1.8 with 5 %**; Midtown 6–9/km → **2.7–4.2/km with 5 %** — the grid offers many
+near-equal routes. In the app a route the walker is on is kept when its remainder is within
+5 % (UI test: kept on ≥ 4 of 6 steps). Next lever if it flickers on the phone: a larger
+tolerance or a per-change minimum gain in seconds.
+
+### 11.5 ETA model
+Pace 1.4 m/s (Relaxed 1.1 / Brisk 1.7), Tobler slope from the bundle's terrain (per
+direction: +10 % → 0.70×, −5 % → 1.19×, −15 % → 0.84× — the plan had −15 % → 0.70, wrong),
+12 s per marked crossing, stairs 0.6×. Not yet checked against real walks: the app's debug
+line shows "last walk: predicted · actual" after a GPS walk, and `PaceEstimator` blends the
+measured pace 50/50 after 300 m / 3 min and learns across walks. Accuracy goes here once
+the owner has walked a few (PLAN Part 3 #9).
+
 ## 7. Testing lessons that cost us
 
 - **Two UI tests passed for a week while testing nothing.** An

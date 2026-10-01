@@ -14,7 +14,11 @@ public struct Route: Sendable {
     public var corridorIndex: [Int]
     public var metres: Double
     public var seconds: Double
-    /// Seconds of the walk in effective sun (geometric sun × beam), whatever the preference.
+    /// Seconds on sidewalks (everything but crossings): the time sun can be chosen for.
+    public var sidewalkSeconds: Double = 0
+    /// Sidewalk seconds in effective sun (geometric sun × beam), whatever the preference.
+    /// Crossings are left out on both sides, as in the cost, so the percentage shown is
+    /// the quantity the slider trades.
     public var sunSeconds: Double
     /// The objective the search minimised.
     public var cost: Double
@@ -30,7 +34,7 @@ public struct Route: Sendable {
     public var capHits: Int
     public var computeMs: Double
 
-    public var sunFraction: Double { seconds > 0 ? sunSeconds / seconds : 0 }
+    public var sunFraction: Double { sidewalkSeconds > 0 ? sunSeconds / sidewalkSeconds : 0 }
     public var isEmpty: Bool { edges.isEmpty }
 }
 
@@ -199,7 +203,10 @@ public enum RouteEngine {
             r.edges.append(corridor.edges[i]); r.corridorIndex.append(i)
             r.edgeSun.append(lSun[Int(id)])
             r.edgeSlot.append(timeline?.slot(atSeconds: lSec[Int(chain[n - 1])] + s / 2) ?? 0)
-            r.sunSeconds += s * Double(lSun[Int(id)])
+            if !graph.isCrossing(Int(corridor.edges[i])) {
+                r.sidewalkSeconds += s
+                r.sunSeconds += s * Double(lSun[Int(id)])
+            }
         }
         r.metres = lDist[Int(found)]
         r.seconds = lSec[Int(found)]
@@ -230,7 +237,10 @@ public enum RouteEngine {
             let s = forward ? edgeSeconds.forward[i] : edgeSeconds.backward[i]
             let (sun, k) = sunOn(timeline, edge: i, enteringAt: r.seconds, seconds: s)
             r.cost += edgeCost(seconds: s, sun: sun, weight: w, prefer: prefer, crossing: graph.isCrossing(Int(e)))
-            r.sunSeconds += s * Double(sun)
+            if !graph.isCrossing(Int(e)) {
+                r.sidewalkSeconds += s
+                r.sunSeconds += s * Double(sun)
+            }
             r.seconds += s
             r.metres += graph.edgeLen[Int(e)]
             r.edges.append(e); r.corridorIndex.append(i); r.edgeSun.append(sun); r.edgeSlot.append(k)
@@ -256,7 +266,7 @@ public enum RouteEngine {
                   seen.insert(r.edges).inserted else { continue }
             routes.append(r)
         }
-        let light: (Route) -> Double = { prefer == .sun ? $0.sunSeconds : $0.seconds - $0.sunSeconds }
+        let light: (Route) -> Double = { prefer == .sun ? $0.sunSeconds : $0.sidewalkSeconds - $0.sunSeconds }
         let pareto = routes.filter { r in
             !routes.contains { o in
                 o.seconds <= r.seconds + 1e-9 && light(o) >= light(r) - 1e-9 &&

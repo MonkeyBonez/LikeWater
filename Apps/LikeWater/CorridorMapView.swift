@@ -2,9 +2,25 @@ import SwiftUI
 import MapKit
 import LikeWaterEngine
 
-final class CorridorBand0: MKMultiPolyline {}
-final class CorridorBand1: MKMultiPolyline {}
-final class CorridorBand2: MKMultiPolyline {}
+/// One colour band of the corridor (or of the ambient sun), at one beam strength: edges
+/// reached in different 15-minute slots can sit under different skies.
+final class CorridorBand: MKMultiPolyline {
+    var band = 0
+    var beam: Float = 1
+    convenience init(_ lines: [MKPolyline], band: Int, beam: Float) {
+        self.init(lines); self.band = band; self.beam = beam
+    }
+}
+
+/// The suggested route, drawn on top. `band` nil = the accent colour (Crossings/Interest).
+final class RouteLine: MKMultiPolyline {
+    var band: Int?
+    var beam: Float = 1
+    var casing = false
+    convenience init(_ lines: [MKPolyline], band: Int?, beam: Float, casing: Bool = false) {
+        self.init(lines); self.band = band; self.beam = beam; self.casing = casing
+    }
+}
 
 final class DestinationAnnotation: MKPointAnnotation {}
 final class UserDotAnnotation: MKPointAnnotation {}
@@ -43,11 +59,15 @@ struct CorridorMapView: UIViewRepresentable {
         context.coordinator.longPressTarget = longPressTarget
         if context.coordinator.rendered != model.overlayVersion {
             context.coordinator.rendered = model.overlayVersion
+            context.coordinator.routeRendered = model.routeVersion
             if model.snapshot == nil, model.destination == nil, let field = model.ambient {
                 context.coordinator.renderAmbient(on: map, field: field)
             } else {
                 context.coordinator.render(on: map, snapshot: model.snapshot)
             }
+        } else if context.coordinator.routeRendered != model.routeVersion {
+            context.coordinator.routeRendered = model.routeVersion
+            context.coordinator.renderRoute(on: map, snapshot: model.snapshot)
         }
         if context.coordinator.recentered != model.recenterRequest,
            let user = model.effectiveUserCoordinate {
@@ -65,6 +85,7 @@ struct CorridorMapView: UIViewRepresentable {
         var model: AppModel
         weak var map: MKMapView?
         var rendered = -1
+        var routeRendered = -1
         var fitted = 0
         var recentered = 0
         var programmatic = false
@@ -107,14 +128,18 @@ struct CorridorMapView: UIViewRepresentable {
             map.removeAnnotations(map.annotations)
             guard let snapshot else { return }
 
-            var bands: [[MKPolyline]] = [[], [], []]
+            // Group by (band, beam to 0.1): ≤ 33 overlays however long the walk.
+            var groups: [Int: [MKPolyline]] = [:]
             for edge in snapshot.edges {
                 var pair = [edge.a, edge.b]
-                bands[band(for: edge, snapshot: snapshot)].append(MKPolyline(coordinates: &pair, count: 2))
+                let beam = snapshot.layer == .sun ? Int((edge.beam * 10).rounded()) : 10
+                groups[band(for: edge, snapshot: snapshot) * 100 + beam, default: []]
+                    .append(MKPolyline(coordinates: &pair, count: 2))
             }
-            if !bands[0].isEmpty { map.addOverlay(CorridorBand0(bands[0]), level: .aboveRoads) }
-            if !bands[1].isEmpty { map.addOverlay(CorridorBand1(bands[1]), level: .aboveRoads) }
-            if !bands[2].isEmpty { map.addOverlay(CorridorBand2(bands[2]), level: .aboveRoads) }
+            for (key, lines) in groups.sorted(by: { $0.key < $1.key }) {
+                map.addOverlay(CorridorBand(lines, band: key / 100, beam: Float(key % 100) / 10), level: .aboveRoads)
+            }
+            addRoute(on: map, snapshot: snapshot)
 
             // PRD: crossing markers only on the Crossings layer.
             if snapshot.layer == .crossings {
@@ -145,12 +170,41 @@ struct CorridorMapView: UIViewRepresentable {
                 var pair = [edge.a, edge.b]
                 bands[edge.bucket.rawValue].append(MKPolyline(coordinates: &pair, count: 2))
             }
-            if !bands[0].isEmpty { map.addOverlay(CorridorBand0(bands[0]), level: .aboveRoads) }
-            if !bands[1].isEmpty { map.addOverlay(CorridorBand1(bands[1]), level: .aboveRoads) }
-            if !bands[2].isEmpty { map.addOverlay(CorridorBand2(bands[2]), level: .aboveRoads) }
+            let beam = Float(model.beamStrength)
+            for (i, lines) in bands.enumerated() where !lines.isEmpty {
+                map.addOverlay(CorridorBand(lines, band: i, beam: beam), level: .aboveRoads)
+            }
             if let user = model.effectiveUserCoordinate {
                 let dot = UserDotAnnotation(); dot.coordinate = user; dot.title = "You"
                 map.addAnnotation(dot)
+            }
+        }
+
+        /// A slider move: swap only the route line.
+        func renderRoute(on map: MKMapView, snapshot: CorridorSnapshot?) {
+            map.removeOverlays(map.overlays.filter { $0 is RouteLine })
+            guard let snapshot else { return }
+            addRoute(on: map, snapshot: snapshot)
+        }
+
+        private func addRoute(on map: MKMapView, snapshot: CorridorSnapshot) {
+            guard let route = snapshot.route, route.coordinates.count >= 2 else { return }
+            let sun = snapshot.layer == .sun && route.hasSun
+            var all: [MKPolyline] = []
+            var groups: [Int: [MKPolyline]] = [:]
+            for k in 0..<(route.coordinates.count - 1) {
+                var pair = [route.coordinates[k], route.coordinates[k + 1]]
+                let line = MKPolyline(coordinates: &pair, count: 2)
+                all.append(line)
+                let key = sun && k < route.edgeBuckets.count
+                    ? route.edgeBuckets[k] * 100 + Int((route.edgeBeams[k] * 10).rounded()) : -1
+                groups[key, default: []].append(MKPolyline(coordinates: &pair, count: 2))
+            }
+            // A white casing under the route lifts it off the corridor.
+            map.addOverlay(RouteLine(all, band: nil, beam: 1, casing: true), level: .aboveLabels)
+            for (key, lines) in groups.sorted(by: { $0.key < $1.key }) {
+                map.addOverlay(RouteLine(lines, band: key < 0 ? nil : key / 100,
+                                         beam: key < 0 ? 1 : Float(key % 100) / 10), level: .aboveLabels)
             }
         }
 
@@ -173,6 +227,7 @@ struct CorridorMapView: UIViewRepresentable {
                 rect = rect.union(MKMapRect(origin: MKMapPoint(c), size: .init(width: 1, height: 1)))
             }
             for edge in snapshot.edges { include(edge.a); include(edge.b) }
+            for c in snapshot.route?.coordinates ?? [] { include(c) }
             include(snapshot.snapped); include(snapshot.destination)
             guard !rect.isNull else { return }
             map.setVisibleMapRect(rect, edgePadding: UIEdgeInsets(top: 110, left: 50, bottom: 320, right: 50),
@@ -199,18 +254,30 @@ struct CorridorMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             let layer = model.snapshot?.layer ?? (model.destination == nil && model.ambient != nil ? .sun : .crossings)
             let palette = colors(for: layer)
-            let index: Int
-            switch overlay {
-            case is CorridorBand0: index = 0
-            case is CorridorBand1: index = 1
-            case is CorridorBand2: index = 2
-            default: return MKOverlayRenderer(overlay: overlay)
+            if let route = overlay as? RouteLine {
+                let renderer = MKMultiPolylineRenderer(multiPolyline: route)
+                if route.casing {
+                    renderer.strokeColor = UIColor.white.withAlphaComponent(0.95)
+                    renderer.lineWidth = 12
+                } else if let band = route.band {
+                    let sunPalette = colors(for: .sun)
+                    renderer.strokeColor = SkyPalette.fade(sunPalette[band].0.withAlphaComponent(1), beam: Double(route.beam))
+                    renderer.lineWidth = 8
+                } else {
+                    renderer.strokeColor = UIColor.systemIndigo
+                    renderer.lineWidth = 8
+                }
+                renderer.lineCap = .round
+                renderer.lineJoin = .round
+                return renderer
             }
-            guard let multi = overlay as? MKMultiPolyline else { return MKOverlayRenderer(overlay: overlay) }
-            let renderer = MKMultiPolylineRenderer(multiPolyline: multi)
-            renderer.strokeColor = layer == .sun ? SkyPalette.fade(palette[index].0, beam: model.beamStrength)
-                                                 : palette[index].0
-            renderer.lineWidth = palette[index].1
+            guard let band = overlay as? CorridorBand else { return MKOverlayRenderer(overlay: overlay) }
+            let renderer = MKMultiPolylineRenderer(multiPolyline: band)
+            var color = palette[band.band].0
+            // With a route on top, the corridor steps back to context.
+            if model.snapshot?.route != nil { color = color.withAlphaComponent(color.cgColor.alpha * 0.6) }
+            renderer.strokeColor = layer == .sun ? SkyPalette.fade(color, beam: Double(band.beam)) : color
+            renderer.lineWidth = palette[band.band].1
             renderer.lineCap = .round
             return renderer
         }
