@@ -33,14 +33,18 @@ Sun Map, but the corridor engine still treats them as walkable. Penalise or excl
 `EdgeFlag.privateAccess` in `CorridorEngine` unless the user's start or destination is
 inside the tract.
 
-## A public bundle server
+## Go live on Cloudflare (owner's step; everything is ready)
 
-The metros live in `Server/` (64 + 175 + 290 MB). Phones get them today by sideloading
-(`devicectl device copy to`). A static host (S3/CloudFront, R2) serving `Server/` and the
-`LWBundleBaseURL` Info.plist key is all the app needs; publishing is an outward-facing step
-the owner has to choose.
+`publish.py --target pages` after `npx wrangler login`; the Worker (`Worker/`) after creating
+its KV namespace; then build the apps with `LW_BUNDLE_BASE_URL` (and
+`LW_COVERAGE_REQUEST_URL`). README "Hosting" has the commands; all of it is tested locally.
+**Trigger:** the owner wants a second phone (or a tester) to download tiles.
 
 ## Open-Meteo proxy before scale
+
+**Status:** written and off — the Worker's `/sky` (15-min shared cache, optional paid key)
+answers 404 until `SKY_PROXY=on`. The apps still call Open-Meteo directly; switching them
+to the proxy is a `WeatherService` URL change.
 
 Nine points per request against the 10k-points/day free tier is ~1,100 requests/day: fine
 for one user, not for a thousand. A caching proxy (one fetch per lattice cell per 30 min,

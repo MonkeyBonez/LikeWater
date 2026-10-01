@@ -9,6 +9,9 @@
 name: build-places
 
 on:
+  # "Request this area" past the Worker's threshold (AUTO_BUILD=on): build that cell's city.
+  repository_dispatch:
+    types: [build-cell]
   workflow_dispatch:
     inputs:
       only:
@@ -16,6 +19,13 @@ on:
         required: false
   schedule:
     - cron: "0 9 * * 1"   # Mondays 09:00 UTC
+
+permissions:
+  contents: write        # commits the new metros.yaml entry for a requested cell
+
+concurrency:
+  group: build-places    # one build at a time: Pages deploys replace the whole site
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -35,15 +45,33 @@ jobs:
         working-directory: Pipeline
         run: |
           python -m venv .venv
-          .venv/bin/pip install -q osmium duckdb shapely numpy pyproj timezonefinder requests pyyaml osmnx
+          .venv/bin/pip install -q -r requirements.txt
       - name: Pull the live site
         working-directory: Pipeline
-        run: .venv/bin/python publish.py --pull "${{ vars.LW_BUNDLE_BASE_URL }}"
+        # The first run has no live site yet; then Server/ starts empty and builds from metros.yaml.
+        run: .venv/bin/python publish.py --pull "${{ vars.LW_BUNDLE_BASE_URL }}" || echo "no live site yet"
       - name: Build
         working-directory: Pipeline
+        env:
+          CELL: ${{ github.event.client_payload.cell }}
+          ONLY_ID: ${{ inputs.only }}
         run: |
-          if [ -n "${{ inputs.only }}" ]; then ONLY="--only ${{ inputs.only }}"; fi
-          .venv/bin/python build_places.py --max-minutes 240 $ONLY
+          if [ -n "$CELL" ]; then
+            .venv/bin/python build_places.py --cell "$CELL" --max-minutes 240
+          elif [ -n "$ONLY_ID" ]; then
+            .venv/bin/python build_places.py --only "$ONLY_ID" --max-minutes 240
+          else
+            .venv/bin/python build_places.py --max-minutes 240
+          fi
+      - name: Remember a requested place
+        if: github.event_name == 'repository_dispatch'
+        run: |
+          if ! git diff --quiet Pipeline/metros.yaml; then
+            git config user.name "likewater-builder"
+            git config user.email "likewater-builder@users.noreply.github.com"
+            git commit -m "metros.yaml: add a place requested from the app (${{ github.event.client_payload.cell }})" Pipeline/metros.yaml
+            git push
+          fi
       - name: Publish
         working-directory: Pipeline
         env:

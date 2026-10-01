@@ -344,8 +344,12 @@ actor CityCatalog {
         let entries = (manifest.metros ?? []).filter { $0.bbox.intersects(box) }
             .sorted { $0.bbox.overlapArea(box) > $1.bbox.overlapArea(box) }
         guard let entry = entries.first else { return locals.first }
-        if let local = locals.first(where: { $0.id == entry.id }),
+        // Tiles live next to the index the manifest names: `<id>/` on Pages,
+        // `metros/<id>/<buildKey>/` on an S3 layout.
+        let remoteFolder = baseURL.appendingPathComponent((entry.index as NSString).deletingLastPathComponent, isDirectory: true)
+        if var local = locals.first(where: { $0.id == entry.id }),
            !MetroIndex.isNewer(entry.buildKey, than: local.buildKey) {
+            if local.buildKey == entry.buildKey { local.remoteDirectory = remoteFolder }
             return local
         }
         if let local = locals.first, local.id != entry.id,
@@ -362,8 +366,7 @@ actor CityCatalog {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: dir.appendingPathComponent("metro.json"))
         let older = locals.first { $0.id == index.id && $0.localDirectory.standardizedFileURL != dir.standardizedFileURL }
-        let metro = MetroDescriptor(index: index, localDirectory: dir,
-                                    remoteDirectory: baseURL.appendingPathComponent(index.id, isDirectory: true),
+        let metro = MetroDescriptor(index: index, localDirectory: dir, remoteDirectory: remoteFolder,
                                     fallbackDirectory: older?.localDirectory, fallbackIndex: older?.index)
         remoteMetroCache[cacheKey] = metro
         metroCache = nil

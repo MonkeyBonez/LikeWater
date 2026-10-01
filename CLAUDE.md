@@ -47,6 +47,14 @@ record what it taught in `LEARNINGS.md`.
   because weather cannot be built ahead of time; it must always degrade to the clear-sky
   map when it fails.
 
+- The route never leaves the corridor or its bound; crossings are never discounted for sun.
+  `lwtool route --compare` (time-aware vs departure-only) is the baseline.
+- Ours-only: no external routing APIs; the pipeline builds places, the apps never route
+  outside built tiles (an unbuilt place is a banner, not a fallback route).
+- Never stitch tiles of two builds; never evict files a configured server can't give back.
+- Publishing (Pages, Worker deploy) is the owner's step. Agents stage and test locally
+  (`publish.py --dry-run`, `wrangler dev`) and stop there.
+
 ## Current plan
 
 `PLAN.md` is the approved plan for the current round (route + ETA inside the corridor,

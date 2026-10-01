@@ -47,3 +47,23 @@ def test_requests_become_us_proposals_merged_per_city():
     assert reasons == {"43.7,-79.4": "outside the USA", "32.7,-117.2": "already in metros.yaml"}
     assert rp.state_extract("California", 37.3, -121.9) == "north-america/us/california/norcal"
     assert rp.state_extract("District of Columbia", 38.9, -77.0) == "north-america/us/district-of-columbia"
+
+
+def test_a_requested_cell_becomes_one_entry_and_foreign_cells_are_refused(tmp_path):
+    geo = {(39.7, -105.0): {"city": "Denver", "state": "Colorado", "country_code": "us"},
+           (43.7, -79.4): {"city": "Toronto", "state": "Ontario", "country_code": "ca", "country": "Canada"}}
+    entry, why = bp.entry_for_cell("39.7,-105.0", [], lambda la, lo: geo[(la, lo)])
+    assert why is None and entry["id"] == "denver" and entry["extract"] == "north-america/us/colorado"
+    assert entry["places"] == ["Denver, Colorado, USA"]
+    entry2, why2 = bp.entry_for_cell("43.7,-79.4", [], lambda la, lo: geo[(la, lo)])
+    assert entry2 is None and why2 == "outside the USA"
+    _, dup = bp.entry_for_cell("39.7,-105.0", [{"id": "denver"}], lambda la, lo: geo[(la, lo)])
+    assert dup == "already in metros.yaml"
+    # Appending keeps the file loadable and the comments intact.
+    f = tmp_path / "m.yaml"
+    f.write_text("# header comment\nmetros:\n  - id: a\n    name: A\n    extract: north-america/us/x\n    places: [\"A, X, USA\"]\n    demo: 1,2\n")
+    bp.append_entry(entry, f)
+    import yaml
+    data = yaml.safe_load(f.read_text())
+    assert [m["id"] for m in data["metros"]] == ["a", "denver"]
+    assert f.read_text().startswith("# header comment")

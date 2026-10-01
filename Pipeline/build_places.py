@@ -133,15 +133,53 @@ def server_limits(server=SERVER):
             "fits_pages": len(files) < 20_000 and biggest < 25 * 2**20}
 
 
+def entry_for_cell(cell: str, places: list, geocode=None):
+    """A metros.yaml entry for a requested 0.1° cell (the Worker's auto-build path), or
+    (None, reason). Same rules as requests_to_places.py: USA only, one entry per city."""
+    import requests_to_places as rp
+    lat, lon = (float(v) for v in cell.split(","))
+    if geocode is None:
+        cache = json.load(open(rp.CACHE)) if rp.CACHE.exists() else {}
+        geocode = lambda la, lo: rp.reverse(la, lo, cache)
+    props, skipped = rp.proposals({cell: 1}, {p["id"] for p in places}, 1, geocode)
+    if not props:
+        return None, (skipped[0][3] if skipped else "nothing found")
+    entry = props[0]
+    entry.pop("requests", None)
+    return entry, None
+
+
+def append_entry(entry, path=HERE / "metros.yaml"):
+    """Appends one entry to metros.yaml as text, keeping the file's comments."""
+    lines = [f"  - id: {entry['id']}", f"    name: {entry['name']}", f"    extract: {entry['extract']}",
+             "    places: [" + ", ".join(json.dumps(p) for p in entry["places"]) + "]",
+             f"    demo: {entry['demo']}", "    # added by build_places.py --cell (a user request)"]
+    with open(path, "a") as f:
+        f.write("\n" + "\n".join(lines) + "\n")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", action="append", help="build (or rebuild) just these ids")
     ap.add_argument("--max-minutes", type=float, default=None, help="don't start a build after this budget")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--publish", action="store_true", help="run publish.py --target pages afterwards")
+    ap.add_argument("--cell", help="LAT,LON of a requested 0.1° cell: add its city to metros.yaml and build it")
     a = ap.parse_args(argv)
 
     places = load_places()
+    if a.cell:
+        entry, reason = entry_for_cell(a.cell, places)
+        if entry is None:
+            print(f"not building {a.cell}: {reason}")
+            return 0
+        print(f"cell {a.cell} → {entry['name']} ({entry['extract']})")
+        if not a.dry_run:
+            append_entry(entry)
+            places = load_places()
+        else:
+            places = places + [entry]
+        a.only = [entry["id"]]
     todo = pending(places, built_ids(), set(a.only) if a.only else None)
     if a.only and len(todo) != len(set(a.only)):
         sys.exit(f"unknown id in --only: {sorted(set(a.only) - {p['id'] for p in todo})}")

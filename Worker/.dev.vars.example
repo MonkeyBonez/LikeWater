@@ -1,0 +1,2 @@
+# Copy to .dev.vars for `wrangler dev` (never committed).
+EXPORT_TOKEN=local-export-token

@@ -264,6 +264,21 @@ different data); Pages is a global CDN. First non-US candidate if ever: Toronto 
 
 ---
 
+## Status (2026-10-01)
+
+| Milestone | State |
+|---|---|
+| E — GOES POC | built + tested; logger running every 15 min on the owner's Mac; verdict after ≥ 10 daytime days (`goes_report.py`) |
+| F — coverage growth | built + tested; Portland built end to end; the ten other metros not built yet (disk: ~28 GB free; run `build_places.py` when wanted) |
+| A — route + ETA + slider + time-of-arrival sun | done; LEARNINGS §11 has Part 3 #1–#6; ETA vs real walks (#9) needs the owner's walks |
+| C — load anywhere | done; LEARNINGS §12 |
+| D — publish-ready | done and tested locally (staged Pages site, S3 layout, Worker under `wrangler dev`, auto-build dispatch against a fake GitHub); going live is the owner's step (README "Hosting") |
+
+Deviations: the Worker lives in `Worker/` (`Server/` is gitignored); `PaceEstimator` is in
+the engine (unit-testable); pace seconds are per direction (slope); crossings are not
+discounted for sun (LEARNINGS §11.2); the hysteresis/route walk test uses `stepButton`
+following the route.
+
 ## Part 2 — What to build
 
 Order: **E** (GOES POC script + logger started on day 1 so two weeks of data accrue while

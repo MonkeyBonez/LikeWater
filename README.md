@@ -84,6 +84,42 @@ version 2 plus a per-node global id. A phone without a server can be given a met
 directly: copy `Server/<id>/` into the app's `Library/Application Support/Cities/<id>/`
 (`xcrun devicectl device copy to --domain-type appDataContainer …`).
 
+## Hosting (free; the owner publishes)
+
+Nothing is public yet. Everything below runs locally; going live is three owner steps.
+
+| Piece | Where | Cost | Status |
+|---|---|---|---|
+| Tiles + manifest | Cloudflare Pages, `likewater-tiles.pages.dev` | free (25 MiB/file, 20k files, unlimited bandwidth) | `publish.py --dry-run` stages it: 267 files, 615 MB, largest 9 MiB |
+| "Request this area" | Worker `likewater-api.<you>.workers.dev` + KV (`Worker/`) | free (100k req/day) | runs under `wrangler dev`; `Worker/smoke.sh` |
+| New places | GitHub Actions `build-places.yml` (weekly, manual, or a Worker dispatch) or the Mac | free minutes | inert until repo vars/secrets are set |
+| Weather proxy | the same Worker, `/sky` | free tier | **off** (`SKY_PROXY`), owner's scaling lever |
+
+Go live:
+1. `npx wrangler login`, then `cd Pipeline && .venv/bin/python publish.py --target pages`
+   (creates/updates the Pages project `likewater-tiles`; `LW_PAGES_PROJECT` overrides).
+2. Build the apps with `LW_BUNDLE_BASE_URL=https://likewater-tiles.pages.dev/`.
+3. Optional: `cd Worker && npx wrangler kv namespace create REQUESTS` (id into
+   `wrangler.toml`), `npx wrangler secret put EXPORT_TOKEN`, `npx wrangler deploy`, and build
+   the apps with `LW_COVERAGE_REQUEST_URL=https://likewater-api.<you>.workers.dev/coverage-request`.
+For cloud builds set repo variables `LW_PAGES_PROJECT`, `LW_BUNDLE_BASE_URL` and secrets
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. For a tap to start a build by itself, set the
+Worker's `AUTO_BUILD=on` and `wrangler secret put GITHUB_TOKEN` (fine-grained, Actions: write).
+
+Test locally (what the UI tests use): `cd build/publish && python3 -m http.server 8770` (staged
+Pages site), `publish.py --target s3 --local-dir build/s3-layout` + `:8771` (bucket layout),
+`cd Worker && cp .dev.vars.example .dev.vars && npx wrangler dev --local --port 8787`.
+If `npx` fails with "Cannot find module …restore-node-options.cjs", run it with
+`env -u NODE_OPTIONS` (a terminal wrapper's stale preload).
+
+## New places
+
+`Pipeline/metros.yaml` lists every place (USA only for now); `build_places.py` builds what
+isn't in the manifest (newest dated Geofabrik extract, `/usr/bin/time -l`, a line per build
+in `cache/build_log.jsonl`); `--cell LAT,LON` turns a requested cell into an entry (Nominatim,
+US only) and builds it; `requests_to_places.py` turns the Worker's export into entries to
+review. Portland was the first: 6.9 min, 2.35 GB peak, 39 tiles, 70 MB.
+
 ## Coverage, builds and eviction
 
 - **Which place**: the box spanned by the screen's corners (or a walk's two ends) picks the

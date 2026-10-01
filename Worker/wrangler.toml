@@ -1,0 +1,25 @@
+# Like Water API Worker (PLAN.md §2 D). Free tier: 100k requests/day on <name>.workers.dev.
+# Local, no account needed:   npx wrangler dev --local --port 8787
+# Deploy (owner):             npx wrangler login && npx wrangler kv namespace create REQUESTS
+#                             (paste the id below) && npx wrangler deploy
+name = "likewater-api"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "REQUESTS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"     # from `wrangler kv namespace create REQUESTS`
+
+[vars]
+# The weather proxy is the owner's scaling lever (PLAN.md §1.1): off until switched on.
+SKY_PROXY = "off"
+# "Request this area" can start a build by itself once a cell has this many requests.
+# Off by default: a human approves new places (requests_to_places.py) until volumes grow.
+AUTO_BUILD = "off"
+AUTO_BUILD_THRESHOLD = "5"
+GITHUB_REPO = "MonkeyBonez/LikeWater"
+GITHUB_API = "https://api.github.com"
+# Secrets (wrangler secret put …), never in this file:
+#   EXPORT_TOKEN     bearer token for GET /coverage-requests
+#   GITHUB_TOKEN     fine-grained token with Actions: write on the repo (only for AUTO_BUILD)
+#   OPEN_METEO_KEY   paid Open-Meteo key (only for SKY_PROXY)
