@@ -44,8 +44,11 @@ def fetch_buildings(bbox, log=print, contained=True):
 
 def heights(gdf, default=10.0, floor_height=3.5, local_default=True, radius_m=150.0):
     """Height per footprint. Where neither height nor floors is known, use the median
-    height of measured neighbours within `radius_m` — a house among houses is a house,
-    a gap in downtown is downtown — falling back to the city median, then `default`."""
+    height of measured neighbours of a similar footprint (within 2x area) inside `radius_m`
+    — a house among houses is a house, a gap in downtown is downtown, and a villa beside a
+    tower is still a villa — falling back to the city median for that footprint size, the
+    city median, then `default`. Size matters where heights are thin and skewed: in Seoul
+    13% are known, mostly big blocks (median 34 m), while the unknown are mostly small."""
     h = gdf["height"].astype(float).to_numpy()
     f = gdf["num_floors"].astype(float).to_numpy() if "num_floors" in gdf else np.full(len(gdf), np.nan)
     known = np.where(np.isfinite(h) & (h > 0), h,
@@ -57,16 +60,27 @@ def heights(gdf, default=10.0, floor_height=3.5, local_default=True, radius_m=15
         return np.where(missing, default, known)          # the old behaviour: flat 10 m
     fill = np.full(len(gdf), np.nanmedian(known) if np.isfinite(known).any() else default)
     if np.isfinite(known).any():
+        import shapely
         from scipy.spatial import cKDTree
         cent = gdf.geometry.representative_point()
         lat0 = float(cent.y.mean())
-        xy = np.column_stack([cent.x.to_numpy() * 111_320 * np.cos(np.radians(lat0)),
-                              cent.y.to_numpy() * 110_540])
-        tree = cKDTree(xy[~missing])
+        kx, ky = 111_320 * np.cos(np.radians(lat0)), 110_540
+        xy = np.column_stack([cent.x.to_numpy() * kx, cent.y.to_numpy() * ky])
+        area = np.maximum(shapely.area(gdf.geometry.values) * kx * ky, 1.0)
+        size = np.floor(np.log2(area)).astype(int)        # one class per doubling of area
+        ks = size[~missing]
         kv = known[~missing]
+        for s in np.unique(size[missing]):                 # city median per size (±1 class)
+            near = np.abs(ks - s) <= 1
+            if near.sum() >= 20:
+                fill[missing & (size == s)] = float(np.median(kv[near]))
+        tree = cKDTree(xy[~missing])
         miss = np.flatnonzero(missing)
         neighbours = tree.query_ball_point(xy[miss], radius_m, workers=-1)
         for i, idx in zip(miss, neighbours):
             if len(idx) >= 3:
-                fill[i] = float(np.median(kv[idx]))
+                idx = np.asarray(idx)
+                idx = idx[np.abs(ks[idx] - size[i]) <= 1]
+                if len(idx) >= 3:
+                    fill[i] = float(np.median(kv[idx]))
     return np.where(missing, fill, known)

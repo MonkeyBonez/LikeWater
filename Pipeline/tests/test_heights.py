@@ -51,6 +51,20 @@ def test_floors_beat_the_default_and_known_heights_are_untouched():
     assert abs(h[2] - 11.25) < 1e-6         # median of its two neighbours (12, 10.5)
 
 
+def test_unknown_small_house_among_towers_takes_small_neighbours():
+    # Seoul: the measured buildings are mostly big blocks, the unknown mostly small villas.
+    # A small footprint takes the small measured neighbours, not the towers beside it.
+    big, small = 0.0002, 0.00007          # ~390 m² and ~48 m², 26 m apart
+    rows = []
+    for i, (h, s) in enumerate([(None, big), (40.0, big), (45.0, big), (42.0, big),
+                                (9.0, small), (10.0, small), (11.0, small), (None, small)]):
+        x = 126.97 + i * 0.0003
+        rows.append({"height": h, "num_floors": None, "geometry": box(x, 37.56, x + s, 37.56 + s)})
+    h = overture.heights(gpd.GeoDataFrame(rows, crs="EPSG:4326"))
+    assert abs(h[0] - 42.0) < 1e-6
+    assert abs(h[7] - 10.0) < 1e-6
+
+
 def test_old_behaviour_is_still_available_as_a_baseline():
     g = _town([5.0, None])
     assert overture.heights(g, local_default=False)[1] == 10.0

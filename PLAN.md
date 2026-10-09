@@ -15,7 +15,9 @@ and `LEARNINGS.md` (what we have measured) first. Line numbers below are as of
   (The analysis that led here is in §1.6; the Apple yardstick/fallback is parked in
   `BACKLOG.md`.)
 - **USA only for now.** New places are seeded from a US list (§2 F). Nothing in the
-  architecture is US-bound (§1.7.10), but no non-US metro is built this round.
+  architecture is US-bound (§1.7.10). **Exception (owner, 2026-10-08): Seoul and
+  Singapore are built** as named entries in `metros.yaml`; automatic proposals
+  (`requests_to_places.py`) stay US-only. See `LEARNINGS.md` §16.
 - **The owner owns scaling plans** (weather rate limits, paid keys, proxies). This plan
   records the triggers and the options and builds none of them.
 - **A GOES fog proof-of-concept first**; the satellite job is built out only if the POC

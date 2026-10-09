@@ -191,7 +191,7 @@ What "build a city" means now, in order, with what each step exists to fix:
 | 3. Join a sidewalk survey if one exists (DataSF) | presence and width without guessing |
 | 4. **Synthesise per-side sidewalks** where OSM lacks them | centrelines can't say which side is lit |
 | 5. Buildings from Overture, not OSM | 96% vs 71% heights |
-| 6. **Local-median default** for unknown heights | 19% of Moorpark houses at 2× |
+| 6. **Local-median default** for unknown heights, **from neighbours of similar footprint** | 19% of Moorpark houses at 2×; Seoul villas filled at 34 m from the towers (§16) |
 | 7. Terrain grid, **+3 km beyond the city** | hills outside a polygon can shade into it |
 | 8. Per-building ground level | a tall building downhill may not shade at all |
 | 9. Interest features with mirror rotation and 3-min timeouts | Overpass hangs |
@@ -686,6 +686,57 @@ build it belongs to, a CI step and the platform it runs on — not in the algori
   pace kicked in; captions showed the kept route at λ = 0/1.
 - Open (BACKLOG): three Pareto searches per fix (~75 ms worst case on a phone); the
   10 km cloud-top product makes "low vs mid" cloud a single pixel for ~16 cells.
+
+## 16. The first cities abroad: Seoul and Singapore (2026-10-08)
+
+The owner's call; `metros.yaml` entries `seoul` (Geofabrik `asia/south-korea`, Nominatim
+"Seoul, South Korea") and `singapore` (`asia/malaysia-singapore-brunei`, "Singapore").
+Nothing in the pipeline or the app needed a code change to go abroad. One default did.
+
+| | Seoul | Singapore |
+|---|---|---|
+| Build (`build_places.py`, cached extract) | 0.9 min, peak 2.3 GB | 4.8 min, peak 2.2 GB |
+| Tiles / size | 57 / 111 MB (max tile 5.7 MB) | 51 / 105 MB (max 5.9 MB) |
+| Graph | 1.06 M nodes, 1.57 M edges, 1 component | 1.08 M nodes, 1.42 M edges, 5 components (main + islands ≥ 2000) |
+| Sidewalks synthesised | 94% of sidewalk edges | 97% |
+| Overture buildings / with height or floors | 511 k / 13% | 318 k / 14% (0.9% height, the rest floors) |
+| Overture sources | OSM 49%, a Zenodo ML set 51% | OSM 50%, Google Open Buildings 36%, Microsoft ML 14% |
+| Terrain (AWS tiles, global) | far field −3..1216 m (Bukhansan) | −3..668 m (Johor hills) |
+| Timezone (timezonefinder) | Asia/Seoul | Asia/Singapore |
+
+- **What worked unchanged:** Geofabrik + `osm_pbf`, Nominatim boundaries, Overture,
+  AWS terrain tiles, timezonefinder, and the live sky: Open-Meteo `best_match` returns 96
+  complete 15-min DNI/diffuse steps a day in both cities (no nulls), interpolated from
+  hourly global models rather than HRRR. Singapore's Nominatim polygon includes
+  territorial waters out to Pedra Branca (bbox 110 × 42 km), but metro bounds come from
+  walk-graph nodes, so the sea costs nothing.
+- **The neighbour-median height fill was wrong where heights are thin and skewed.** In
+  Seoul the measured 13% are mostly big blocks (median footprint 395 m², median 34 m);
+  the unmeasured are mostly small villas (median 87 m²). The fill gave the villas 34 m:
+  the city's median height went to 34.0 m. Measured heights by footprint show the
+  gradient was in the data all along: <150 m² → 7–10 m, ≥250 m² → 40–48 m (Singapore:
+  <400 m² → 5–7 m, 400–2000 m² → 35–42 m). Fix (`overture.heights`): neighbours and the
+  city fallback only count buildings within 2× the footprint area. Seoul median → 10.5 m;
+  Seattle/Portland fills barely move (72–89% known). Baseline diff, `lwtool sun --radius
+  400`, Oct 9, old fill → new:
+
+  | Place | 09:00 KST shaded | 15:00 KST shaded |
+  |---|---|---|
+  | Mangwon (villas) | 69% → 47% | 60% → 35% |
+  | Seochon (hanok/villas) | 82% → 76% | 82% → 75% |
+  | City Hall | 86% → 85% | 70% → 69% |
+  | Gangnam (towers) | 96% → 96% | 78% → 78% |
+
+  The same lesson as Moorpark's flat 10 m (§3.4), one level up: a *local* default is
+  still a default when the sample it is drawn from is biased.
+- **Honest gaps abroad (BACKLOG):** Seoul's 3–6 m shared alleys get a synthesised
+  sidewalk on each side (Mangwon 100% synthesised) where a walker sees one lane;
+  Singapore's covered linkways (OSM `covered=yes`) are shade we don't model, so HDB
+  estates read sunnier than they walk (Toa Payoh 59% sunny at 09:00); no canopy anywhere;
+  Himawari, not GOES, would be the satellite for East Asia.
+- **Process:** a non-US place is the same one `metros.yaml` entry, but check the height
+  coverage by footprint size before trusting the fill (known share per size bin from the
+  cached `metro_<id>__buildings_overture.pkl`).
 
 ## 7. Testing lessons that cost us
 

@@ -58,12 +58,35 @@ sun), free and on-device, but no via points (it can't follow our route) and undo
 throttling. **Trigger:** users stuck in unbuilt places, or disputes about our ETA.
 **Effort:** ~1 day (AppleDirections wrapper, dashed overlay, debug comparison line).
 
-## Non-US metros
+## More non-US metros
 
-Nothing is US-bound (PLAN.md §1.7.10): terrain abroad is ~30 m, no sidewalk surveys or
-canopy (synthesis defaults), 15-min DNI only from HRRR (N. America) and ICON-D2/AROME
-(central Europe), GOES covers the Americas only. **First candidate:** Toronto (HRDPS
-2.5 km). **Trigger:** owner decision. **Effort:** one `metros.yaml` entry + a build.
+Seoul and Singapore are built (LEARNINGS §16): one `metros.yaml` entry + a build each,
+~1–5 min with cached inputs. What abroad still lacks: no sidewalk surveys or canopy
+(synthesis defaults), 15-min DNI is interpolated from hourly global models outside HRRR /
+ICON-D2 / AROME, GOES covers the Americas only (East Asia would be Himawari).
+**Next candidates:** Toronto (HRDPS 2.5 km), Tokyo. **Trigger:** owner decision.
+**Before many more:** a place whose Overture heights are under ~20% known should be
+spot-checked (`lwtool sun` vs. the old fill), as Seoul was.
+
+## Narrow alleys get synthesised sidewalks (Seoul)
+
+Seoul's villa neighbourhoods are 3–6 m shared alleys (골목) with no kerb; synthesis treats
+them as streets and draws a sidewalk on each side (Mangwon: 100% synthesised). The sun on
+an alley is close to the sun on its centreline, so the error is small, but the corridor
+counts two "sides" and their crossings where a walker sees one lane. **Fix:** treat
+`highway=service|living_street|residential` narrower than ~6 m (`width`, or no
+`lanes`/`sidewalk` and a short block) as a shared lane — keep the centreline, no
+synthesis, no crossings. **Trigger:** a Seoul walk where crossings or side choice feel
+wrong. **Effort:** ~half a day + a `--no-sidewalk-synthesis` diff per city.
+
+## Covered walkways are shade (Singapore)
+
+Singapore's HDB estates and MRT approaches are threaded with covered linkways (OSM
+`covered=yes` on `highway=footway`, and `building=roof` canopies). We score them as open
+sky, so an estate reads sunnier than it walks (Toa Payoh 59% sunny at 09:00). **Fix:** a
+`FLAG_COVERED` edge bit from `covered=yes|arcade` / `tunnel=building_passage`, scored
+fully shaded; `building=roof` polygons as 3 m buildings. **Trigger:** first Singapore
+walk. **Effort:** ~half a day (pipeline flag, one line in the scorer, bundle-format bit).
 
 ## Scheduled rebuilds for freshness
 

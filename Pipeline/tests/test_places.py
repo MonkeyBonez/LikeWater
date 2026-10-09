@@ -7,10 +7,16 @@ def test_every_place_is_well_formed_and_ids_are_unique():
     places = bp.load_places()
     ids = [p["id"] for p in places]
     assert len(ids) == len(set(ids))
+    abroad = {"seoul", "singapore"}            # the owner's explicit exceptions (2026-10-08)
+    assert abroad <= set(ids)
     for p in places:
-        assert p["extract"].startswith("north-america/us/"), "USA only for now"
-        assert p["places"] and all(", USA" in name for name in p["places"])
+        assert p["places"]
         lat, lon = (float(v) for v in str(p["demo"]).split(","))
+        if p["id"] in abroad:
+            assert p["extract"].startswith("asia/")
+            continue
+        assert p["extract"].startswith("north-america/us/"), "USA only, bar the named exceptions"
+        assert all(", USA" in name for name in p["places"])
         assert 18 < lat < 72 and -170 < lon < -60
 
 

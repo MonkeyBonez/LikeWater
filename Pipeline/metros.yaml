@@ -9,7 +9,8 @@
 #   demo      LAT,LON the app shows when the user is elsewhere
 #   min_component  optional; keep disconnected pieces at least this big (default 2000)
 #
-# USA only for now (PLAN.md standing decisions).
+# USA for growth (PLAN.md standing decisions); Seoul and Singapore are the owner's explicit
+# exceptions (2026-10-08). requests_to_places.py still proposes US places only.
 
 metros:
   # --- built before this list existed (kept so rebuilds use the same arguments) ---
@@ -96,3 +97,15 @@ metros:
     extract: north-america/us/district-of-columbia
     places: ["Washington, District of Columbia, USA"]
     demo: 38.8977,-77.0365
+
+  # --- first non-US metros: the owner's call (2026-10-08) ---
+  - id: seoul
+    name: Seoul
+    extract: asia/south-korea
+    places: ["Seoul, South Korea"]
+    demo: 37.5663,126.9779
+  - id: singapore
+    name: Singapore
+    extract: asia/malaysia-singapore-brunei
+    places: ["Singapore"]
+    demo: 1.2839,103.8515
